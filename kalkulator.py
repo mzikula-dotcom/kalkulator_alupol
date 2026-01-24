@@ -2,168 +2,238 @@ import streamlit as st
 import pandas as pd
 import math
 
-# --- KONFIGURACE ---
-st.set_page_config(page_title="Kalkulátor zastřešení", layout="wide")
+# --- KONFIGURACE STRÁNKY ---
+st.set_page_config(page_title="Kalkulátor Zastřešení", layout="wide")
 
-# --- FUNKCE PRO NAČTENÍ DAT ---
+# --- NAČTENÍ DAT ---
 @st.cache_data
 def load_data():
     try:
-        # Načítáme data, oddělovač je středník
+        # Načítáme CSV, předpokládáme středník jako oddělovač
         df_ceniky = pd.read_csv('ceniky.csv', sep=';', header=None)
         df_priplatky = pd.read_csv('priplatky.csv', sep=';', header=None)
         return df_ceniky, df_priplatky
     except FileNotFoundError:
-        st.error("CHYBA: Nenalezeny soubory 'ceniky.csv' nebo 'priplatky.csv'. Nahrajte je prosím.")
         return None, None
 
 # --- POMOCNÉ FUNKCE ---
-def clean_price(value):
-    """Převede text '1 200 Kč' nebo '15%' na číslo."""
-    if pd.isna(value): return 0
-    val_str = str(value).strip().replace(' ', '').replace('Kč', '').replace('Kc', '')
+def parse_value(raw_value):
+    """
+    Zjistí, jestli je hodnota fixní částka (5000) nebo procento (0.15).
+    Vrací tuple: (typ, hodnota). Typ může být 'fix' nebo 'pct'.
+    """
+    if pd.isna(raw_value): return 'fix', 0
+    s = str(raw_value).strip().replace(' ', '').replace('Kč', '').replace('Kc', '')
     
-    # Detekce procent
-    if '%' in val_str:
-        return float(val_str.replace('%', '').replace(',', '.')) / 100.0
-    
-    # Detekce čísla
-    try:
-        return float(val_str.replace(',', '.'))
-    except ValueError:
-        return 0
+    if '%' in s:
+        try:
+            val = float(s.replace('%', '').replace(',', '.')) / 100.0
+            return 'pct', val
+        except:
+            return 'fix', 0
+    else:
+        try:
+            val = float(s.replace(',', '.'))
+            return 'fix', val
+        except:
+            return 'fix', 0
 
-# --- HLAVNÍ VÝPOČET ---
-def calculate_price(model, width, modules, df_ceniky):
-    # 1. Najít řádek modelu
-    # Hledáme v prvním sloupci (index 0) název modelu
+def get_surcharge_data(df_priplatky, search_term):
+    """Najde řádek v příplatcích a vrátí jeho hodnotu (fix nebo %)"""
+    if df_priplatky is None: return 'fix', 0
+    
+    # Hledáme text bez ohledu na velká/malá písmena
+    mask = df_priplatky[0].astype(str).str.contains(search_term, case=False, na=False)
+    row = df_priplatky[mask]
+    
+    if not row.empty:
+        # Sloupec 1 obvykle obsahuje cenu pro standardní modely
+        raw = row.iloc[0, 1] 
+        return parse_value(raw)
+    return 'fix', 0
+
+# --- VÝPOČET ZÁKLADNÍ CENY (Jádro z VBA) ---
+def calculate_base_price(model, width, modules, df_ceniky):
     try:
-        # Převedeme na string a lowercase pro bezpečné hledání
+        # Najít startovní řádek modelu
         mask = df_ceniky[0].astype(str).str.lower() == model.lower()
         start_index = df_ceniky.index[mask].tolist()[0]
     except IndexError:
-        return 0, 0, "Model nenalezen v ceníku"
+        return 0, 0, "Model nenalezen"
 
-    # 2. Určit posun řádku podle šířky (Logika z VBA)
-    # Terrace má offset 1750, ostatní 2750
+    # Offsety (Terrace vs Ostatní) - převzato z VBA logiky
     offset = 1750 if model.upper() == "TERRACE" else 2750
     
-    # Výpočet řádku: Každých 250mm je nový řádek
-    # Logika: pokud je šířka 3000 a offset 2750 -> (250)/250 = 1. řádek posunu
-    # Zaokrouhlujeme nahoru (ceil), protože "do 3m" zahrnuje vše pod 3m
+    # Výpočet řádku (skoky po 250mm)
     if width < (offset + 250):
         row_shift = 0
     else:
         row_shift = math.ceil((width - (offset + 250)) / 250)
         if row_shift < 0: row_shift = 0
 
-    target_row = start_index + 1 + row_shift # +1 protože první řádek je název
+    target_row = start_index + 1 + row_shift
 
-    # 3. Určit sloupec podle modulů
-    # 2 moduly = sloupec 1 (cena), sloupec 2 (výška)
-    # 3 moduly = sloupec 3, 4 atd.
-    # Vzorec: 1 + (moduly - 2) * 2
+    # Výpočet sloupce
     col_price = 1 + (modules - 2) * 2
     col_height = col_price + 1
 
-    # 4. Vytáhnout hodnotu
     try:
-        raw_price = df_ceniky.iloc[target_row, col_price]
-        raw_height = df_ceniky.iloc[target_row, col_height]
+        raw_p = df_ceniky.iloc[target_row, col_price]
+        raw_h = df_ceniky.iloc[target_row, col_height]
         
-        price = clean_price(raw_price)
-        # Výška je v tabulce v metrech (např. 0,91), převedeme na mm
-        height = clean_price(raw_height) * 1000 
-        
-        return price, height, None
-    except Exception as e:
-        return 0, 0, f"Mimo rozsah ceníku (chyba: {e})"
+        _, price = parse_value(raw_p)
+        _, height = parse_value(raw_h)
+        return price, height * 1000, None # Výška je v metrech, převádíme na mm
+    except:
+        return 0, 0, "Rozměr mimo ceník"
 
-# --- APLIKACE ---
-st.title("🛠 Konfigurátor Zastřešení")
-df_ceniky, df_priplatky = load_data()
+# --- HLAVNÍ APLIKACE ---
+st.title("🛠 Kalkulátor Zastřešení")
 
-if df_ceniky is not None:
-    # 1. SLOUPEC - VSTUPY
-    col_input, col_result = st.columns([1, 1.5])
+df_c, df_p = load_data()
+
+if df_c is None:
+    st.error("Chyba: Nahrajte soubory ceniky.csv a priplatky.csv na GitHub.")
+    st.stop()
+
+# 1. ČÁST: Vstupy (Levý panel)
+with st.sidebar:
+    st.header("Zadání parametrů")
     
-    with col_input:
-        st.subheader("1. Rozměry a Typ")
-        models_list = ["PRACTIC", "HARMONY", "DREAM", "HORIZONT", "STAR", "ROCK", "TERRACE", "WAVE", "FLASH", "WING", "SUNSET"]
+    model = st.selectbox("Model", ["PRACTIC", "HARMONY", "DREAM", "HORIZONT", "STAR", "ROCK", "TERRACE", "WAVE", "FLASH", "WING", "SUNSET"])
+    sirka = st.number_input("Šířka (mm)", 2000, 8000, 3500, step=10)
+    moduly = st.slider("Počet modulů", 2, 7, 3)
+    
+    st.markdown("---")
+    st.subheader("Konfigurace")
+    
+    # Logika zobrazení checkboxů (dynamická)
+    opt_ral = st.checkbox("Nástřik RAL")
+    opt_podhori = st.checkbox("Zpevnění pro podhorskou oblast")
+    
+    # Plný polykarbonát (často se počítá za modul)
+    opt_poly_modul = st.checkbox("Plný polykarbonát v modulech")
+    
+    st.markdown("---")
+    st.subheader("Doplňky")
+    opt_dvere_vc = st.checkbox("Dveře ve velkém čele")
+    opt_klapka = st.checkbox("Větrací klapka")
+    opt_koleje = st.checkbox("Pochozí koleje")
+    
+    st.markdown("---")
+    # Montáž je specifická - výběr typu
+    typ_montaze = st.radio("Montáž", ["Bez montáže", "Montáž v ČR", "Montáž v zahraničí"])
+
+# 2. ČÁST: Výpočet a Výstup (Hlavní okno)
+base_price, height, err = calculate_base_price(model, sirka, moduly, df_c)
+
+if err:
+    st.warning(f"⚠ {err}")
+else:
+    # --- LOGIKA CENOTVORBY ---
+    final_price = base_price
+    offer_items = [] # Seznam pro výpis položek
+    
+    # 1. Základ
+    offer_items.append({"polozka": f"Zastřešení {model} ({moduly} moduly)", "cena": base_price, "info": f"Šířka: {sirka} mm, Výška: {height:.0f} mm"})
+    
+    # 2. Procentuální příplatky (počítají se ze základu)
+    pct_surcharges = 0
+    
+    if opt_ral:
+        typ, val = get_surcharge_data(df_p, "RAL") # Hledá v CSV "RAL"
+        # Pokud v CSV nic nenajde, použije 15% jako fallback
+        if typ == 'fix' and val == 0: val = 0.15 
         
-        sel_model = st.selectbox("Model zastřešení", models_list)
-        sel_width = st.number_input("Šířka (mm)", min_value=2000, max_value=8000, value=3500, step=10)
-        sel_modules = st.slider("Počet modulů", 2, 7, 3)
+        cost = base_price * val
+        pct_surcharges += cost
+        offer_items.append({"polozka": "Nástřik RAL", "cena": cost, "info": f"Příplatek {val*100:.0f}%"})
 
-        st.subheader("2. Doplňky")
-        # Checkboxy pro příplatky
-        opt_ral = st.checkbox("Nástřik RAL (+15%)")
-        opt_door = st.checkbox("Dveře v čele")
-        opt_klapka = st.checkbox("Větrací klapka")
-        opt_koleje = st.checkbox("Pochozí koleje")
-        opt_montaz = st.selectbox("Montáž", ["Bez montáže", "Montáž ČR", "Montáž Zahraničí"])
+    if opt_podhori:
+        typ, val = get_surcharge_data(df_p, "podhorskou")
+        if val == 0: val = 0.15
+        cost = base_price * val
+        pct_surcharges += cost
+        offer_items.append({"polozka": "Zpevnění (Podhorská obl.)", "cena": cost, "info": f"Příplatek {val*100:.0f}%"})
 
-    # 2. SLOUPEC - VÝPOČET
-    with col_result:
-        st.subheader("Kalkulace")
+    final_price += pct_surcharges
+
+    # 3. Fixní příplatky a příplatky za kus/modul
+    fix_surcharges = 0
+    
+    if opt_poly_modul:
+        # Většinou cena za modul * počet modulů
+        typ, val = get_surcharge_data(df_p, "Plný polykarbonát")
+        if val == 0: val = 1000 # Fallback
+        cost = val * moduly # Počítáme krát počet modulů
+        fix_surcharges += cost
+        offer_items.append({"polozka": "Plný polykarbonát (čirý)", "cena": cost, "info": f"{val:,.0f} Kč x {moduly} modulů"})
+
+    if opt_dvere_vc:
+        typ, val = get_surcharge_data(df_p, "Jednokřídlé dveře")
+        if val == 0: val = 5000
+        fix_surcharges += val
+        offer_items.append({"polozka": "Dveře ve velkém čele", "cena": val, "info": ""})
+
+    if opt_klapka:
+        typ, val = get_surcharge_data(df_p, "klapka")
+        if val == 0: val = 7000
+        fix_surcharges += val
+        offer_items.append({"polozka": "Větrací klapka", "cena": val, "info": ""})
         
-        base_price, height, error = calculate_price(sel_model, sel_width, sel_modules, df_ceniky)
+    if opt_koleje:
+        # Pochozí koleje - ve VBA je to často zdarma nebo příplatek
+        typ, val = get_surcharge_data(df_p, "Pochozí kolejnice") 
+        # Zde záleží na logice - někdy je to za bm, někdy paušál. 
+        # Pro ukázku bereme paušál z CSV
+        fix_surcharges += val
+        offer_items.append({"polozka": "Pochozí koleje", "cena": val, "info": ""})
 
-        if error:
-            st.warning(f"⚠ {error}. Zkuste upravit rozměry.")
-        else:
-            final_price = base_price
-            items = []
+    final_price += fix_surcharges
+
+    # 4. Montáž (Počítá se obvykle z celkové ceny materiálu nebo ze základu? 
+    # Většinou ze základu, ale upravíme dle potřeby)
+    montaz_price = 0
+    if typ_montaze != "Bez montáže":
+        search = "zahraničí" if "zahraničí" in typ_montaze else "v ČR"
+        typ, val = get_surcharge_data(df_p, f"Montáž zastřešení {search}")
+        
+        if val == 0: val = 0.08 # Fallback 8%
+        
+        montaz_price = base_price * val
+        offer_items.append({"polozka": typ_montaze, "cena": montaz_price, "info": f"Sazba {val*100:.1f}%"})
+    
+    final_price += montaz_price
+
+    # --- VIZUÁLNÍ VÝSTUP (CENOVÁ NABÍDKA) ---
+    st.subheader("Cenová kalkulace")
+    
+    # Tabulka položek
+    df_offer = pd.DataFrame(offer_items)
+    # Formátování čísel pro hezčí zobrazení
+    if not df_offer.empty:
+        col1, col2, col3 = st.columns([3, 2, 1])
+        with col1:
+            st.write("**Položka**")
+        with col2:
+            st.write("**Detail**")
+        with col3:
+            st.write("**Cena**")
+        st.divider()
+        
+        for index, row in df_offer.iterrows():
+            c1, c2, c3 = st.columns([3, 2, 1])
+            c1.write(row['polozka'])
+            c2.caption(row['info'])
+            c3.write(f"{row['cena']:,.0f} Kč")
             
-            # Výpis základu
-            items.append(f"**Základ ({sel_model}):** {base_price:,.0f} Kč")
-            st.info(f"📏 Výška nejvyššího modulu: cca {height:.0f} mm")
-
-            # Výpočet příplatků
-            def get_surcharge(search_term):
-                """Najde cenu v priplatky.csv podle názvu"""
-                row = df_priplatky[df_priplatky[0].astype(str).str.contains(search_term, case=False, na=False)]
-                if not row.empty:
-                    return clean_price(row.iloc[0, 1])
-                return 0
-
-            # Logika příplatků
-            surcharges = 0
-            
-            if opt_ral:
-                # RAL je procentuální
-                ral_cost = base_price * 0.15 
-                surcharges += ral_cost
-                items.append(f"Nástřik RAL (15%): {ral_cost:,.0f} Kč")
-
-            if opt_door:
-                door_cost = get_surcharge("Jednokřídlé dveře")
-                # Fallback kdyby v CSV nebyla cena
-                if door_cost == 0: door_cost = 5000 
-                surcharges += door_cost
-                items.append(f"Dveře: {door_cost:,.0f} Kč")
-
-            if opt_klapka:
-                klapka_cost = get_surcharge("klapka")
-                if klapka_cost == 0: klapka_cost = 7000
-                surcharges += klapka_cost
-                items.append(f"Větrací klapka: {klapka_cost:,.0f} Kč")
-
-            if opt_montaz == "Montáž ČR":
-                montaz_pct = get_surcharge("Montáž zastřešení v ČR") # v CSV je např. 0.06 nebo 0.08
-                if montaz_pct == 0: montaz_pct = 0.08
-                montaz_cost = base_price * montaz_pct
-                surcharges += montaz_cost
-                items.append(f"Montáž ČR ({montaz_pct*100:.0f}%): {montaz_cost:,.0f} Kč")
-
-            # Finální součet
-            final_price += surcharges
-
-            # Vizuální výpis účtenky
-            st.markdown("---")
-            for i in items:
-                st.write(i)
-            st.markdown("---")
-            
-            st.markdown(f"### Celkem bez DPH: {final_price:,.0f} Kč")
-            st.markdown(f"**Celkem s DPH (21%): {final_price * 1.21:,.0f} Kč**")
+    st.divider()
+    
+    # Celkové součty
+    total_col1, total_col2 = st.columns([4, 2])
+    
+    with total_col2:
+        st.write(f"Cena bez DPH: **{final_price:,.0f} Kč**")
+        dph = final_price * 0.21
+        st.write(f"DPH (21%): {dph:,.0f} Kč")
+        st.markdown(f"### Celkem: {final_price * 1.21:,.0f} Kč")
