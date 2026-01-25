@@ -10,7 +10,7 @@ from fpdf import FPDF
 st.set_page_config(page_title="Kalkulátor Rentmil", layout="wide", page_icon="🏊‍♂️")
 
 # ==========================================
-# 1. DATA (VLOŽENÁ PŘÍMO V KÓDU)
+# 1. DATA
 # ==========================================
 csv_ceniky_data = """Počet modulů;2;;3;;4;;5;;6;;7;
 Cena;910 Kč;;2 729 Kč;;5 459 Kč;;9 098 Kč;;13 647 Kč;;19 106 Kč;
@@ -89,7 +89,7 @@ def load_data():
         return None, None
 
 # ==========================================
-# 2. GENERÁTOR PDF (RENTMIL DESIGN)
+# 2. GENERÁTOR PDF
 # ==========================================
 class PDF(FPDF):
     def header(self):
@@ -97,21 +97,28 @@ class PDF(FPDF):
         RENTMIL_BLUE = (0, 75, 150)
         RENTMIL_ORANGE = (240, 120, 0)
         
-        # Logo a Mnich
-        logo_path = "logo.png" if os.path.exists("logo.png") else None
-        mnich_path = "mnich.png" if os.path.exists("mnich.png") else None
+        # Bezpečné načtení obrázků
+        logo_files = ["logo.png", "Logo.png", "LOGO.png", "logo.jpg"]
+        mnich_files = ["mnich.png", "Mnich.png", "MNICH.png", "mnich.jpg"]
         
-        if logo_path: self.image(logo_path, 10, 8, 45)
-        if mnich_path: self.image(mnich_path, 170, 8, 30)
+        found_logo = next((f for f in logo_files if os.path.exists(f)), None)
+        found_mnich = next((f for f in mnich_files if os.path.exists(f)), None)
+        
+        if found_logo: self.image(found_logo, 10, 8, 45)
+        if found_mnich: self.image(found_mnich, 170, 8, 30)
 
         # Nadpis
-        self.set_font('DejaVu', 'B', 20)
-        self.set_text_color(*RENTMIL_BLUE) # Modrá
+        try:
+            self.set_font('DejaVu', 'B', 20)
+        except:
+            self.set_font('Arial', 'B', 20)
+            
+        self.set_text_color(*RENTMIL_BLUE)
         self.cell(80) 
         self.cell(30, 10, 'CENOVÁ NABÍDKA', 0, 0, 'C')
         self.ln(12)
         
-        # Oranžová čára
+        # Čára
         self.set_draw_color(*RENTMIL_ORANGE)
         self.set_line_width(0.8)
         self.line(10, 25, 200, 25)
@@ -120,28 +127,27 @@ class PDF(FPDF):
     def footer(self):
         RENTMIL_BLUE = (0, 75, 150)
         self.set_y(-20)
-        
-        # Modrá čára dole
         self.set_draw_color(*RENTMIL_BLUE)
         self.set_line_width(0.5)
         self.line(10, 275, 200, 275)
         
-        self.set_font('DejaVu', '', 8)
-        self.set_text_color(100, 100, 100) # Šedá
+        try:
+            self.set_font('DejaVu', '', 8)
+        except:
+            self.set_font('Arial', '', 8)
+            
+        self.set_text_color(100, 100, 100)
         self.cell(0, 5, 'Rentmil s.r.o. | www.rentmil.cz | bazeny@rentmil.cz', 0, 1, 'C')
         self.cell(0, 5, f'Strana {self.page_no()}', 0, 0, 'C')
 
 def create_pdf(zak_udaje, items, totals):
     pdf = PDF()
     
-    # Barvy definice
-    RENTMIL_BLUE = (0, 75, 150)
-    RENTMIL_ORANGE = (240, 120, 0)
-    DARK_GREY = (50, 50, 50)
-    
-    # Fonty
+    # Fonty - Fallback
     font_path = "font.ttf"
-    if os.path.exists(font_path):
+    has_font = os.path.exists(font_path)
+    
+    if has_font:
         pdf.add_font('DejaVu', '', font_path, uni=True)
         pdf.add_font('DejaVu', 'B', font_path, uni=True)
         pdf.set_font('DejaVu', '', 10)
@@ -150,10 +156,13 @@ def create_pdf(zak_udaje, items, totals):
 
     pdf.add_page()
     
-    # --- HLAVIČKA ZÁKAZNÍKA ---
+    RENTMIL_BLUE = (0, 75, 150)
+    RENTMIL_ORANGE = (240, 120, 0)
+    DARK_GREY = (50, 50, 50)
+    
     pdf.set_text_color(*DARK_GREY)
     
-    # Levý sloupec: Dodavatel (Rentmil)
+    # --- DODAVATEL / ODBĚRATEL ---
     x_start = 10
     y_start = 35
     pdf.set_xy(x_start, y_start)
@@ -174,9 +183,12 @@ def create_pdf(zak_udaje, items, totals):
     
     pdf.ln(3)
     pdf.set_font('', 'B', 9)
-    pdf.cell(90, 5, f"Vypracoval: {zak_udaje['vypracoval']}", 0, 1)
     
-    # Pravý sloupec: Odběratel
+    # Ošetření češtiny pokud chybí font
+    vypracoval_txt = zak_udaje['vypracoval'] if has_font else "Vypracoval"
+    pdf.cell(90, 5, f"Vypracoval: {vypracoval_txt}", 0, 1)
+    
+    # Odběratel
     pdf.set_xy(110, y_start)
     pdf.set_font('', 'B', 11)
     pdf.set_text_color(*RENTMIL_BLUE)
@@ -185,28 +197,32 @@ def create_pdf(zak_udaje, items, totals):
     
     pdf.set_font('', 'B', 11)
     pdf.set_x(110)
-    pdf.cell(90, 6, f"{zak_udaje['jmeno']}", 0, 1)
+    
+    # Fallback pro jméno bez diakritiky
+    jmeno_txt = zak_udaje['jmeno'] if has_font else "Zakaznik"
+    pdf.cell(90, 6, jmeno_txt, 0, 1)
     
     pdf.set_font('', '', 10)
     pdf.set_x(110)
-    pdf.multi_cell(80, 5, f"{zak_udaje['adresa']}\n\nTel: {zak_udaje['tel']}\nEmail: {zak_udaje['email']}")
+    
+    adr_txt = zak_udaje['adresa'] if has_font else ""
+    pdf.multi_cell(80, 5, f"{adr_txt}\n\nTel: {zak_udaje['tel']}\nEmail: {zak_udaje['email']}")
     
     pdf.set_xy(110, y_start + 40)
     pdf.set_font('', 'B', 9)
-    pdf.cell(40, 5, f"Datum vystavení:", 0, 0)
+    pdf.cell(40, 5, "Datum vystavení:", 0, 0)
     pdf.set_font('', '', 9)
     pdf.cell(40, 5, f"{zak_udaje['datum']}", 0, 1)
     
     pdf.set_x(110)
     pdf.set_font('', 'B', 9)
-    pdf.cell(40, 5, f"Platnost nabídky:", 0, 0)
+    pdf.cell(40, 5, "Platnost nabídky:", 0, 0)
     pdf.set_font('', '', 9)
     pdf.cell(40, 5, f"{zak_udaje['platnost']}", 0, 1)
     
     pdf.ln(10)
     
-    # --- TABULKA POLOŽEK ---
-    # Hlavička tabulky - Modrá s bílým písmem
+    # --- TABULKA ---
     pdf.set_fill_color(*RENTMIL_BLUE)
     pdf.set_text_color(255, 255, 255)
     pdf.set_font('', 'B', 10)
@@ -214,22 +230,24 @@ def create_pdf(zak_udaje, items, totals):
     pdf.cell(60, 8, " Detail", 0, 0, 'L', True)
     pdf.cell(40, 8, "Cena (Kč) ", 0, 1, 'R', True)
     
-    # Položky
     pdf.set_text_color(*DARK_GREY)
     pdf.set_font('', '', 10)
     
     fill = False
     for item in items:
-        # Zebra efekt - velmi světle šedá
         if fill: pdf.set_fill_color(245, 245, 245)
         else: pdf.set_fill_color(255, 255, 255)
         
-        pdf.cell(90, 7, " " + item['pol'], 0, 0, 'L', True)
-        pdf.cell(60, 7, " " + item['det'], 0, 0, 'L', True)
+        # Odstranění diakritiky pokud chybí font
+        pol_txt = item['pol'] if has_font else item['pol'].encode('ascii', 'ignore').decode()
+        det_txt = item['det'] if has_font else item['det'].encode('ascii', 'ignore').decode()
+        
+        pdf.cell(90, 7, " " + pol_txt, 0, 0, 'L', True)
+        pdf.cell(60, 7, " " + det_txt, 0, 0, 'L', True)
         pdf.cell(40, 7, f"{item['cen']:,.0f} ".replace(',', ' '), 0, 1, 'R', True)
         
         pdf.set_draw_color(230, 230, 230)
-        pdf.line(10, pdf.get_y(), 200, pdf.get_y()) # Tenká linka pod řádkem
+        pdf.line(10, pdf.get_y(), 200, pdf.get_y())
         fill = not fill
 
     pdf.ln(5)
@@ -245,31 +263,34 @@ def create_pdf(zak_udaje, items, totals):
     pdf.cell(30, 6, f"{totals['dph']:,.0f} Kč".replace(',', ' '), 0, 1, 'R')
     
     pdf.ln(3)
-    
-    # Celkem - Velké a Oranžové
     pdf.set_x(110)
     pdf.set_font('', 'B', 14)
     pdf.set_text_color(*RENTMIL_ORANGE)
     pdf.cell(50, 10, "CELKEM K ÚHRADĚ:", 0, 0, 'R')
     pdf.cell(30, 10, f"{totals['s_dph']:,.0f} Kč".replace(',', ' '), 0, 1, 'R')
     
-    pdf.set_text_color(*DARK_GREY) # Zpět na šedou
+    pdf.set_text_color(*DARK_GREY)
     
-    # --- TERMÍN DODÁNÍ (Rámeček) ---
+    # --- PATIČKA DODÁNÍ ---
     pdf.ln(15)
-    pdf.set_fill_color(240, 248, 255) # Velmi světlá modrá
+    pdf.set_fill_color(240, 248, 255)
     pdf.set_draw_color(*RENTMIL_BLUE)
     pdf.rect(10, pdf.get_y(), 190, 20, 'DF')
     
     pdf.set_xy(12, pdf.get_y() + 2)
     pdf.set_font('', 'B', 10)
-    pdf.cell(40, 6, "Termín dodání:", 0, 1)
+    txt_termin = "Termín dodání:" if has_font else "Termin dodani:"
+    pdf.cell(40, 6, txt_termin, 0, 1)
+    
     pdf.set_font('', '', 10)
     pdf.set_x(12)
-    pdf.cell(0, 6, f"{zak_udaje['termin']}", 0, 1)
+    term_val = zak_udaje['termin'] if has_font else "Dle dohody"
+    pdf.cell(0, 6, term_val, 0, 1)
+    
     pdf.set_x(12)
     pdf.set_font('', 'I', 8)
-    pdf.cell(0, 6, "Poznámka: Tato nabídka je nezávazná. Pro potvrzení objednávky kontaktujte svého obchodního zástupce.", 0, 1)
+    note = "Poznámka: Tato nabídka je nezávazná. Pro potvrzení kontaktujte svého obchodního zástupce." if has_font else "Poznamka: Tato nabidka je nezavazna."
+    pdf.cell(0, 6, note, 0, 1)
     
     return pdf.output(dest='S').encode('latin-1')
 
@@ -341,7 +362,7 @@ def calculate_base_price(model, width, modules, df_c):
 # ==========================================
 # 4. HLAVNÍ APLIKACE
 # ==========================================
-st.title("🛠 Konfigurátor Zastřešení")
+st.title("🛠 Konfigurátor a Cenová nabídka")
 df_c, df_p = load_data()
 
 # --- ZÁKAZNÍK ---
@@ -560,5 +581,6 @@ else:
                 st.download_button("📄 Stáhnout Nabídku (PDF)", data=pdf_data, file_name=f"Nabidka_{zak_jmeno.replace(' ','_')}.pdf", mime="application/pdf", type="primary")
             except Exception as e:
                 st.error(f"Chyba PDF: {e}")
+                st.write(str(e)) # Výpis chyby pro diagnostiku
         else:
             st.info("Pro stažení PDF vyplňte jméno zákazníka.")
