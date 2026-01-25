@@ -89,7 +89,7 @@ def load_data():
         return None, None
 
 # ==========================================
-# 2. GENERÁTOR PDF
+# 2. GENERÁTOR PDF (RENTMIL DESIGN)
 # ==========================================
 class PDF(FPDF):
     def header(self):
@@ -282,13 +282,14 @@ def create_pdf(zak_udaje, items, totals):
     txt_termin = "Termín dodání:" if has_font else "Termin dodani:"
     pdf.cell(40, 6, txt_termin, 0, 1)
     
-    pdf.set_font('', '', 10)
+    pdf.set_font('', '', 10) # <-- ZMĚNA: Použito obyčejné písmo, ne kurzíva 'I'
     pdf.set_x(12)
     term_val = zak_udaje['termin'] if has_font else "Dle dohody"
     pdf.cell(0, 6, term_val, 0, 1)
     
     pdf.set_x(12)
-    pdf.set_font('', 'I', 8)
+    # Poznámka dole - také obyčejné písmo (nebo Bold 'B', ale ne 'I')
+    pdf.set_font('', '', 8) 
     note = "Poznámka: Tato nabídka je nezávazná. Pro potvrzení kontaktujte svého obchodního zástupce." if has_font else "Poznamka: Tato nabidka je nezavazna."
     pdf.cell(0, 6, note, 0, 1)
     
@@ -362,7 +363,7 @@ def calculate_base_price(model, width, modules, df_c):
 # ==========================================
 # 4. HLAVNÍ APLIKACE
 # ==========================================
-st.title("🛠 Konfigurátor a Cenová nabídka")
+st.title("🛠 Konfigurátor Zastřešení")
 df_c, df_p = load_data()
 
 # --- ZÁKAZNÍK ---
@@ -581,6 +582,6 @@ else:
                 st.download_button("📄 Stáhnout Nabídku (PDF)", data=pdf_data, file_name=f"Nabidka_{zak_jmeno.replace(' ','_')}.pdf", mime="application/pdf", type="primary")
             except Exception as e:
                 st.error(f"Chyba PDF: {e}")
-                st.write(str(e)) # Výpis chyby pro diagnostiku
+                st.write(str(e))
         else:
             st.info("Pro stažení PDF vyplňte jméno zákazníka.")
