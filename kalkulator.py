@@ -10,6 +10,19 @@ from fpdf import FPDF
 st.set_page_config(page_title="Kalkulátor Zastřešení", layout="wide")
 
 # ==========================================
+# 0. DIAGNOSTIKA SOUBORŮ (PRO LADĚNÍ)
+# ==========================================
+# Toto se zobrazí jen tobě nahoře, abys viděl, co chybí.
+missing_files = []
+if not os.path.exists("logo.png"): missing_files.append("logo.png")
+if not os.path.exists("mnich.png"): missing_files.append("mnich.png")
+if not os.path.exists("font.ttf"): missing_files.append("font.ttf")
+
+if missing_files:
+    st.error(f"⚠️ POZOR: Na GitHubu chybí tyto soubory (PDF bude bez nich): {', '.join(missing_files)}")
+    st.info("Tip: Zkontrolujte, zda se jmenují přesně takto (malá písmena!). Linux rozlišuje 'Logo.png' a 'logo.png'.")
+
+# ==========================================
 # 1. DATA (VLOŽENÁ PŘÍMO V KÓDU)
 # ==========================================
 csv_ceniky_data = """Počet modulů;2;;3;;4;;5;;6;;7;
@@ -93,17 +106,21 @@ def load_data():
 # ==========================================
 class PDF(FPDF):
     def header(self):
-        # Pokus o načtení loga (pokud existuje)
-        if os.path.exists("logo.png"):
-            self.image("logo.png", 10, 8, 33)
+        # Robustnější načítání obrázků
+        logo_path = "logo.png" if os.path.exists("logo.png") else None
+        mnich_path = "mnich.png" if os.path.exists("mnich.png") else None
         
-        # Pokus o načtení mnicha (pokud existuje)
-        if os.path.exists("mnich.png"):
-            # Umístíme ho do pravého horního rohu
-            self.image("mnich.png", 170, 8, 30)
+        # Logo vlevo
+        if logo_path:
+            self.image(logo_path, 10, 8, 33)
+        
+        # Mnich vpravo
+        if mnich_path:
+            self.image(mnich_path, 170, 8, 30)
 
+        # Nadpis uprostřed
         self.set_font('DejaVu', 'B', 15)
-        self.cell(80) # Posun doprava
+        self.cell(80) # Posun
         self.cell(30, 10, 'CENOVÁ NABÍDKA', 0, 0, 'C')
         self.ln(20)
 
@@ -115,20 +132,18 @@ class PDF(FPDF):
 def create_pdf(zak_udaje, items, totals):
     pdf = PDF()
     
-    # Registrace fontu (NUTNÉ PRO ČEŠTINU)
-    # Hledáme soubor font.ttf. Pokud není, použijeme Arial (ale rozbije se čeština)
+    # Fonty
     font_path = "font.ttf"
     if os.path.exists(font_path):
         pdf.add_font('DejaVu', '', font_path, uni=True)
         pdf.add_font('DejaVu', 'B', font_path, uni=True)
         pdf.set_font('DejaVu', '', 10)
     else:
-        # Fallback (bude bez diakritiky)
         pdf.set_font('Arial', '', 10)
 
     pdf.add_page()
     
-    # --- HLAVIČKA ZÁKAZNÍKA ---
+    # --- HLAVIČKA ---
     pdf.set_font_size(10)
     
     # Levý sloupec: Dodavatel
@@ -137,9 +152,9 @@ def create_pdf(zak_udaje, items, totals):
     pdf.set_font('', 'B')
     pdf.cell(90, 5, "DODAVATEL:", 0, 1)
     pdf.set_font('', '')
-    pdf.cell(90, 5, "ALUPOL s.r.o.", 0, 1) # Příklad
+    pdf.cell(90, 5, "ALUPOL s.r.o.", 0, 1)
     pdf.cell(90, 5, f"Vypracoval: {zak_udaje['vypracoval']}", 0, 1)
-    pdf.cell(90, 5, f"Datum vystavení: {zak_udaje['datum']}", 0, 1)
+    pdf.cell(90, 5, f"Datum: {zak_udaje['datum']}", 0, 1)
     pdf.cell(90, 5, f"Platnost do: {zak_udaje['platnost']}", 0, 1)
     
     # Pravý sloupec: Odběratel
@@ -150,33 +165,27 @@ def create_pdf(zak_udaje, items, totals):
     pdf.set_x(110)
     pdf.cell(90, 5, f"{zak_udaje['jmeno']}", 0, 1)
     pdf.set_x(110)
+    # Multicell pro adresu
     pdf.multi_cell(80, 5, f"{zak_udaje['adresa']}\nTel: {zak_udaje['tel']}\nEmail: {zak_udaje['email']}")
     
     pdf.ln(15)
     
-    # --- TABULKA POLOŽEK ---
-    # Hlavička tabulky
-    pdf.set_fill_color(200, 220, 255) # Firemní modrá (světlá)
+    # --- TABULKA ---
+    pdf.set_fill_color(240, 240, 240)
     pdf.set_font('', 'B')
     pdf.cell(90, 8, "Položka", 1, 0, 'L', True)
     pdf.cell(60, 8, "Detail", 1, 0, 'L', True)
     pdf.cell(40, 8, "Cena (Kč)", 1, 1, 'R', True)
     
-    # Položky
     pdf.set_font('', '')
-    fill = False
     for item in items:
-        # Detekce výšky řádku (kvůli dlouhým textům)
-        line_height = 6
-        pdf.cell(90, line_height, item['pol'], 1, 0, 'L', fill)
-        pdf.cell(60, line_height, item['det'], 1, 0, 'L', fill)
-        pdf.cell(40, line_height, f"{item['cen']:,.0f}".replace(',', ' '), 1, 1, 'R', fill)
-        # fill = not fill # Střídání barev řádků (volitelné)
+        pdf.cell(90, 6, item['pol'], 1, 0, 'L')
+        pdf.cell(60, 6, item['det'], 1, 0, 'L')
+        pdf.cell(40, 6, f"{item['cen']:,.0f}".replace(',', ' '), 1, 1, 'R')
 
     pdf.ln(5)
     
     # --- SOUČTY ---
-    # Zarovnání doprava
     pdf.set_x(110)
     pdf.cell(50, 6, "Cena bez DPH:", 0, 0, 'R')
     pdf.cell(30, 6, f"{totals['bez_dph']:,.0f} Kč".replace(',', ' '), 0, 1, 'R')
@@ -187,15 +196,13 @@ def create_pdf(zak_udaje, items, totals):
     
     pdf.set_x(110)
     pdf.set_font('', 'B', 12)
-    pdf.set_text_color(0, 50, 100) # Tmavě modrá pro cenu
     pdf.cell(50, 10, "CELKEM K ÚHRADĚ:", 0, 0, 'R')
     pdf.cell(30, 10, f"{totals['s_dph']:,.0f} Kč".replace(',', ' '), 0, 1, 'R')
-    pdf.set_text_color(0, 0, 0) # Zpět na černou
     
     # --- PATIČKA ---
     pdf.ln(10)
     pdf.set_font('', '', 10)
-    pdf.multi_cell(0, 5, f"Termín dodání: {zak_udaje['termin']}\n\nPoznámka: Tato nabídka je nezávazná. Pro potvrzení prosím kontaktujte svého obchodního zástupce.")
+    pdf.multi_cell(0, 5, f"Termín dodání: {zak_udaje['termin']}\n\nPoznámka: Tato nabídka je nezávazná. Pro potvrzení objednávky kontaktujte svého obchodního zástupce.")
     
     return pdf.output(dest='S').encode('latin-1')
 
@@ -270,35 +277,24 @@ def calculate_base_price(model, width, modules, df_c):
 st.title("🛠 Konfigurátor a Cenová nabídka")
 df_c, df_p = load_data()
 
-# --- SEKCE ÚDAJE O ZÁKAZNÍKOVI ---
+# --- ZÁKAZNÍK ---
 with st.expander("👤 Údaje o zákazníkovi a nabídce", expanded=True):
     col_cust1, col_cust2 = st.columns(2)
-    
     with col_cust1:
         st.subheader("Zákazník")
         zak_jmeno = st.text_input("Jméno a příjmení")
         zak_adresa = st.text_input("Adresa")
         zak_tel = st.text_input("Telefon")
         zak_email = st.text_input("Email")
-        
     with col_cust2:
         st.subheader("Nabídka")
-        vypracoval = st.selectbox("Nabídku vypracoval:", [
-            "Martin Zikula",
-            "Zuzana Zikulová",
-            "Drahoslav Houška",
-            "Ivan Reif",
-            "Lenka Finklarová"
-        ])
-        
-        col_date1, col_date2 = st.columns(2)
-        with col_date1:
-            platnost_dny = st.number_input("Platnost (dní)", value=10, min_value=1)
-        with col_date2:
+        vypracoval = st.selectbox("Vypracoval:", ["Martin Zikula", "Zuzana Zikulová", "Drahoslav Houška", "Ivan Reif", "Lenka Finklarová"])
+        col_d1, col_d2 = st.columns(2)
+        with col_d1: platnost_dny = st.number_input("Platnost (dní)", value=10, min_value=1)
+        with col_d2: 
             datum_vystaveni = date.today()
             platnost_do = datum_vystaveni + timedelta(days=platnost_dny)
             st.date_input("Platnost do:", value=platnost_do, disabled=True)
-            
         termin_dodani = st.text_input("Termín dodání", value="dle dohody (cca 6-8 týdnů)")
 
 # --- SIDEBAR ---
@@ -318,25 +314,23 @@ with st.sidebar:
 
     st.markdown("---")
     st.header("3. Úpravy modulů")
-    st.write("**Zkrácení modulů:**")
-    zkraceni_ks = st.number_input("Počet modulů ke zkrácení", 0, moduly, 0)
-    st.write("**Prodloužení modulů:**")
-    prodlouzeni_ks = st.number_input("Počet modulů k prodloužení", 0, moduly, 0)
-    prodlouzeni_mm = st.number_input("Délka prodloužení (mm) / modul", 0, 2000, 0, step=10)
+    zkraceni_ks = st.number_input("Zkrácení (ks)", 0, moduly, 0)
+    prodlouzeni_ks = st.number_input("Prodloužení (ks)", 0, moduly, 0)
+    prodlouzeni_mm = st.number_input("Délka prodloužení (mm)", 0, 2000, 0, step=10)
 
     st.markdown("---")
     st.header("4. Doplňky")
     pocet_dvere_vc = st.number_input("Dveře v čele (ks)", 0, 2, 0)
     pocet_dvere_bok = st.number_input("Boční vstup (ks)", 0, 4, 0)
-    zamykaci_klika = st.checkbox("Zamykací klika (všechny dveře)")
+    zamykaci_klika = st.checkbox("Zamykací klika")
     klapka = st.checkbox("Větrací klapka")
     pochozi_koleje = st.checkbox("Pochozí koleje")
     ext_draha_m = st.number_input("Prodloužení dráhy (m)", 0.0, 20.0, 0.0, step=0.5)
-    podhori = st.checkbox("Zpevnění pro podhorskou oblast")
+    podhori = st.checkbox("Zpevnění Podhoří")
 
     st.markdown("---")
     st.header("5. Ostatní")
-    km = st.number_input("Doprava (km celkem)", 0, 5000, 0)
+    km = st.number_input("Doprava (km)", 0, 5000, 0)
     montaz = st.checkbox("Montáž", value=True)
     sleva_pct = st.number_input("Sleva (%)", 0, 100, 0)
     dph_sazba = st.selectbox("DPH", [21, 12, 0])
@@ -347,7 +341,6 @@ base_price, height, length, err = calculate_base_price(model, sirka, moduly, df_
 if err:
     st.error(f"⚠️ Nelze vypočítat: {err}")
 else:
-    # --- VÝPOČET POLOŽEK ---
     items = []
     items.append({"pol": f"Zastřešení {model}", "det": f"{moduly} seg., Š: {sirka}mm", "cen": base_price})
     running = base_price
@@ -358,15 +351,12 @@ else:
         cost = zkraceni_ks * val
         items.append({"pol": "Zkrácení modulů", "det": f"{zkraceni_ks} ks x {val} Kč", "cen": cost})
         running += cost
-    
     if prodlouzeni_ks > 0 and prodlouzeni_mm > 0:
-        fix_fee = get_surcharge(df_p, "Prodloužení modulu", is_rock) or 3000
-        per_meter = get_surcharge(df_p, "za metr", is_rock) or 2000
-        len_m = prodlouzeni_mm / 1000.0
-        cost_per_mod = fix_fee + (len_m * per_meter)
-        total_ext_cost = prodlouzeni_ks * cost_per_mod
-        items.append({"pol": "Prodloužení modulů", "det": f"{prodlouzeni_ks} ks á {prodlouzeni_mm}mm", "cen": total_ext_cost})
-        running += total_ext_cost
+        fix = get_surcharge(df_p, "Prodloužení modulu", is_rock) or 3000
+        per_m = get_surcharge(df_p, "za metr", is_rock) or 2000
+        c = prodlouzeni_ks * (fix + (prodlouzeni_mm/1000.0 * per_m))
+        items.append({"pol": "Prodloužení modulů", "det": f"{prodlouzeni_ks} ks á {prodlouzeni_mm}mm", "cen": c})
+        running += c
 
     # Barvy
     if "Stříbrný" in barva_typ:
@@ -389,15 +379,15 @@ else:
         items.append({"pol": "Příplatek Antracit", "det": f"{val*100:.0f}%", "cen": c})
         running += c
 
-    # Polykarbonát
+    # Poly
     roof_a, face_a = calculate_geometry(sirka, height, length)
-    poly_m2 = get_surcharge(df_p, "Plný polykarbonát", is_rock) or 1000
+    poly_p = get_surcharge(df_p, "Plný polykarbonát", is_rock) or 1000
     if poly_strecha:
-        c = roof_a * poly_m2
+        c = roof_a * poly_p
         items.append({"pol": "Plný poly (Střecha)", "det": f"{roof_a:.1f} m²", "cen": c})
         running += c
     if poly_cela:
-        c = (face_a * 2) * poly_m2
+        c = (face_a * 2) * poly_p
         items.append({"pol": "Plný poly (Čela)", "det": f"{face_a*2:.1f} m²", "cen": c})
         running += c
     if change_color_poly:
@@ -460,7 +450,6 @@ else:
         val = get_surcharge(df_p, "Montáž zastřešení v ČR", is_rock) or 0.08
         c_montaz = running * val
         items.append({"pol": "Montáž (ČR)", "det": f"{val*100:.0f}% z materiálu", "cen": c_montaz})
-    
     subtotal = running + c_montaz
     
     # Doprava
@@ -468,7 +457,6 @@ else:
     if km > 0:
         c_doprava = km * 18
         items.append({"pol": "Doprava", "det": f"{km} km", "cen": c_doprava})
-        
     total_no_vat = subtotal + c_doprava
     
     # Sleva
@@ -477,42 +465,33 @@ else:
         items.append({"pol": "SLEVA", "det": f"-{sleva_pct}%", "cen": -disc})
         total_no_vat -= disc
 
-    # --- ZOBRAZENÍ A EXPORT ---
+    # --- ZOBRAZENÍ ---
     st.divider()
-    col_l, col_r = st.columns([1.5, 1])
-    
-    with col_l:
-        st.subheader("Položky nabídky")
+    col1, col2 = st.columns([1.5, 1])
+    with col1:
+        st.subheader("Rozpočet")
         df_show = pd.DataFrame(items)
         if not df_show.empty:
             st.dataframe(df_show, hide_index=True, use_container_width=True)
-            
-    with col_r:
-        st.subheader("Cena celkem")
+    with col2:
+        st.subheader("Celkem")
         dph_val = total_no_vat * (dph_sazba / 100.0)
         total_with_vat = total_no_vat + dph_val
         st.metric("Bez DPH", f"{total_no_vat:,.0f} Kč")
         st.metric(f"S DPH ({dph_sazba}%)", f"{total_with_vat:,.0f} Kč")
         
-        # --- PDF TLAČÍTKO ---
-        st.markdown("---")
-        if zak_jmeno: # Povolíme jen když je vyplněno jméno
+        # PDF tlačítko
+        if zak_jmeno:
             zak_udaje = {
                 'jmeno': zak_jmeno, 'adresa': zak_adresa, 'tel': zak_tel, 'email': zak_email,
                 'vypracoval': vypracoval, 'datum': datum_vystaveni.strftime("%d.%m.%Y"),
                 'platnost': platnost_do.strftime("%d.%m.%Y"), 'termin': termin_dodani
             }
             totals = {'bez_dph': total_no_vat, 'dph': dph_val, 's_dph': total_with_vat, 'sazba_dph': dph_sazba}
-            
-            # Tlačítko pro stažení
             try:
-                # Kontrola fontu
-                if not os.path.exists("font.ttf"):
-                    st.warning("⚠️ POZOR: Na GitHubu chybí soubor 'font.ttf'. PDF bude bez české diakritiky.")
-                    
                 pdf_data = create_pdf(zak_udaje, items, totals)
-                st.download_button("📄 Stáhnout Nabídku v PDF", data=pdf_data, file_name=f"Nabidka_{zak_jmeno.replace(' ','_')}.pdf", mime="application/pdf", type="primary")
+                st.download_button("📄 Stáhnout Nabídku (PDF)", data=pdf_data, file_name=f"Nabidka_{zak_jmeno.replace(' ','_')}.pdf", mime="application/pdf", type="primary")
             except Exception as e:
-                st.error(f"Chyba při tvorbě PDF: {e}")
+                st.error(f"Chyba PDF: {e}")
         else:
-            st.info("Pro stažení PDF vyplňte Jméno zákazníka.")
+            st.info("Pro stažení PDF vyplňte jméno zákazníka.")
