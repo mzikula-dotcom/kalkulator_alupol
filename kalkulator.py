@@ -7,20 +7,7 @@ from datetime import date, timedelta
 from fpdf import FPDF
 
 # --- KONFIGURACE STRÁNKY ---
-st.set_page_config(page_title="Kalkulátor Zastřešení", layout="wide")
-
-# ==========================================
-# 0. DIAGNOSTIKA SOUBORŮ (PRO LADĚNÍ)
-# ==========================================
-# Toto se zobrazí jen tobě nahoře, abys viděl, co chybí.
-missing_files = []
-if not os.path.exists("logo.png"): missing_files.append("logo.png")
-if not os.path.exists("mnich.png"): missing_files.append("mnich.png")
-if not os.path.exists("font.ttf"): missing_files.append("font.ttf")
-
-if missing_files:
-    st.error(f"⚠️ POZOR: Na GitHubu chybí tyto soubory (PDF bude bez nich): {', '.join(missing_files)}")
-    st.info("Tip: Zkontrolujte, zda se jmenují přesně takto (malá písmena!). Linux rozlišuje 'Logo.png' a 'logo.png'.")
+st.set_page_config(page_title="Kalkulátor Rentmil", layout="wide", page_icon="🏊‍♂️")
 
 # ==========================================
 # 1. DATA (VLOŽENÁ PŘÍMO V KÓDU)
@@ -102,35 +89,55 @@ def load_data():
         return None, None
 
 # ==========================================
-# 2. GENERÁTOR PDF
+# 2. GENERÁTOR PDF (RENTMIL DESIGN)
 # ==========================================
 class PDF(FPDF):
     def header(self):
-        # Robustnější načítání obrázků
+        # Barvy
+        RENTMIL_BLUE = (0, 75, 150)
+        RENTMIL_ORANGE = (240, 120, 0)
+        
+        # Logo a Mnich
         logo_path = "logo.png" if os.path.exists("logo.png") else None
         mnich_path = "mnich.png" if os.path.exists("mnich.png") else None
         
-        # Logo vlevo
-        if logo_path:
-            self.image(logo_path, 10, 8, 33)
-        
-        # Mnich vpravo
-        if mnich_path:
-            self.image(mnich_path, 170, 8, 30)
+        if logo_path: self.image(logo_path, 10, 8, 45)
+        if mnich_path: self.image(mnich_path, 170, 8, 30)
 
-        # Nadpis uprostřed
-        self.set_font('DejaVu', 'B', 15)
-        self.cell(80) # Posun
+        # Nadpis
+        self.set_font('DejaVu', 'B', 20)
+        self.set_text_color(*RENTMIL_BLUE) # Modrá
+        self.cell(80) 
         self.cell(30, 10, 'CENOVÁ NABÍDKA', 0, 0, 'C')
-        self.ln(20)
+        self.ln(12)
+        
+        # Oranžová čára
+        self.set_draw_color(*RENTMIL_ORANGE)
+        self.set_line_width(0.8)
+        self.line(10, 25, 200, 25)
+        self.ln(15)
 
     def footer(self):
-        self.set_y(-15)
+        RENTMIL_BLUE = (0, 75, 150)
+        self.set_y(-20)
+        
+        # Modrá čára dole
+        self.set_draw_color(*RENTMIL_BLUE)
+        self.set_line_width(0.5)
+        self.line(10, 275, 200, 275)
+        
         self.set_font('DejaVu', '', 8)
-        self.cell(0, 10, f'Strana {self.page_no()}', 0, 0, 'C')
+        self.set_text_color(100, 100, 100) # Šedá
+        self.cell(0, 5, 'Rentmil s.r.o. | www.rentmil.cz | bazeny@rentmil.cz', 0, 1, 'C')
+        self.cell(0, 5, f'Strana {self.page_no()}', 0, 0, 'C')
 
 def create_pdf(zak_udaje, items, totals):
     pdf = PDF()
+    
+    # Barvy definice
+    RENTMIL_BLUE = (0, 75, 150)
+    RENTMIL_ORANGE = (240, 120, 0)
+    DARK_GREY = (50, 50, 50)
     
     # Fonty
     font_path = "font.ttf"
@@ -143,50 +150,93 @@ def create_pdf(zak_udaje, items, totals):
 
     pdf.add_page()
     
-    # --- HLAVIČKA ---
-    pdf.set_font_size(10)
+    # --- HLAVIČKA ZÁKAZNÍKA ---
+    pdf.set_text_color(*DARK_GREY)
     
-    # Levý sloupec: Dodavatel
+    # Levý sloupec: Dodavatel (Rentmil)
     x_start = 10
-    pdf.set_xy(x_start, 40)
-    pdf.set_font('', 'B')
-    pdf.cell(90, 5, "DODAVATEL:", 0, 1)
-    pdf.set_font('', '')
-    pdf.cell(90, 5, "ALUPOL s.r.o.", 0, 1)
+    y_start = 35
+    pdf.set_xy(x_start, y_start)
+    
+    pdf.set_font('', 'B', 11)
+    pdf.set_text_color(*RENTMIL_BLUE)
+    pdf.cell(90, 6, "DODAVATEL:", 0, 1)
+    pdf.set_text_color(*DARK_GREY)
+    
+    pdf.set_font('', 'B', 10)
+    pdf.cell(90, 5, "Rentmil s.r.o.", 0, 1)
+    pdf.set_font('', '', 9)
+    pdf.cell(90, 5, "Lidická 1233/26, 323 00 Plzeň", 0, 1)
+    pdf.cell(90, 5, "IČO: 26342910, DIČ: CZ26342910", 0, 1)
+    pdf.cell(90, 5, "Tel: 737 222 004, 377 530 806", 0, 1)
+    pdf.cell(90, 5, "Email: bazeny@rentmil.cz", 0, 1)
+    pdf.cell(90, 5, "Web: www.rentmil.cz", 0, 1)
+    
+    pdf.ln(3)
+    pdf.set_font('', 'B', 9)
     pdf.cell(90, 5, f"Vypracoval: {zak_udaje['vypracoval']}", 0, 1)
-    pdf.cell(90, 5, f"Datum: {zak_udaje['datum']}", 0, 1)
-    pdf.cell(90, 5, f"Platnost do: {zak_udaje['platnost']}", 0, 1)
     
     # Pravý sloupec: Odběratel
-    pdf.set_xy(110, 40)
-    pdf.set_font('', 'B')
-    pdf.cell(90, 5, "ODBĚRATEL:", 0, 1)
-    pdf.set_font('', '')
+    pdf.set_xy(110, y_start)
+    pdf.set_font('', 'B', 11)
+    pdf.set_text_color(*RENTMIL_BLUE)
+    pdf.cell(90, 6, "ODBĚRATEL:", 0, 1)
+    pdf.set_text_color(*DARK_GREY)
+    
+    pdf.set_font('', 'B', 11)
     pdf.set_x(110)
-    pdf.cell(90, 5, f"{zak_udaje['jmeno']}", 0, 1)
+    pdf.cell(90, 6, f"{zak_udaje['jmeno']}", 0, 1)
+    
+    pdf.set_font('', '', 10)
     pdf.set_x(110)
-    # Multicell pro adresu
-    pdf.multi_cell(80, 5, f"{zak_udaje['adresa']}\nTel: {zak_udaje['tel']}\nEmail: {zak_udaje['email']}")
+    pdf.multi_cell(80, 5, f"{zak_udaje['adresa']}\n\nTel: {zak_udaje['tel']}\nEmail: {zak_udaje['email']}")
     
-    pdf.ln(15)
+    pdf.set_xy(110, y_start + 40)
+    pdf.set_font('', 'B', 9)
+    pdf.cell(40, 5, f"Datum vystavení:", 0, 0)
+    pdf.set_font('', '', 9)
+    pdf.cell(40, 5, f"{zak_udaje['datum']}", 0, 1)
     
-    # --- TABULKA ---
-    pdf.set_fill_color(240, 240, 240)
-    pdf.set_font('', 'B')
-    pdf.cell(90, 8, "Položka", 1, 0, 'L', True)
-    pdf.cell(60, 8, "Detail", 1, 0, 'L', True)
-    pdf.cell(40, 8, "Cena (Kč)", 1, 1, 'R', True)
+    pdf.set_x(110)
+    pdf.set_font('', 'B', 9)
+    pdf.cell(40, 5, f"Platnost nabídky:", 0, 0)
+    pdf.set_font('', '', 9)
+    pdf.cell(40, 5, f"{zak_udaje['platnost']}", 0, 1)
     
-    pdf.set_font('', '')
+    pdf.ln(10)
+    
+    # --- TABULKA POLOŽEK ---
+    # Hlavička tabulky - Modrá s bílým písmem
+    pdf.set_fill_color(*RENTMIL_BLUE)
+    pdf.set_text_color(255, 255, 255)
+    pdf.set_font('', 'B', 10)
+    pdf.cell(90, 8, " Položka", 0, 0, 'L', True)
+    pdf.cell(60, 8, " Detail", 0, 0, 'L', True)
+    pdf.cell(40, 8, "Cena (Kč) ", 0, 1, 'R', True)
+    
+    # Položky
+    pdf.set_text_color(*DARK_GREY)
+    pdf.set_font('', '', 10)
+    
+    fill = False
     for item in items:
-        pdf.cell(90, 6, item['pol'], 1, 0, 'L')
-        pdf.cell(60, 6, item['det'], 1, 0, 'L')
-        pdf.cell(40, 6, f"{item['cen']:,.0f}".replace(',', ' '), 1, 1, 'R')
+        # Zebra efekt - velmi světle šedá
+        if fill: pdf.set_fill_color(245, 245, 245)
+        else: pdf.set_fill_color(255, 255, 255)
+        
+        pdf.cell(90, 7, " " + item['pol'], 0, 0, 'L', True)
+        pdf.cell(60, 7, " " + item['det'], 0, 0, 'L', True)
+        pdf.cell(40, 7, f"{item['cen']:,.0f} ".replace(',', ' '), 0, 1, 'R', True)
+        
+        pdf.set_draw_color(230, 230, 230)
+        pdf.line(10, pdf.get_y(), 200, pdf.get_y()) # Tenká linka pod řádkem
+        fill = not fill
 
     pdf.ln(5)
     
     # --- SOUČTY ---
     pdf.set_x(110)
+    pdf.set_font('', '', 10)
     pdf.cell(50, 6, "Cena bez DPH:", 0, 0, 'R')
     pdf.cell(30, 6, f"{totals['bez_dph']:,.0f} Kč".replace(',', ' '), 0, 1, 'R')
     
@@ -194,15 +244,32 @@ def create_pdf(zak_udaje, items, totals):
     pdf.cell(50, 6, f"DPH ({totals['sazba_dph']}%):", 0, 0, 'R')
     pdf.cell(30, 6, f"{totals['dph']:,.0f} Kč".replace(',', ' '), 0, 1, 'R')
     
+    pdf.ln(3)
+    
+    # Celkem - Velké a Oranžové
     pdf.set_x(110)
-    pdf.set_font('', 'B', 12)
+    pdf.set_font('', 'B', 14)
+    pdf.set_text_color(*RENTMIL_ORANGE)
     pdf.cell(50, 10, "CELKEM K ÚHRADĚ:", 0, 0, 'R')
     pdf.cell(30, 10, f"{totals['s_dph']:,.0f} Kč".replace(',', ' '), 0, 1, 'R')
     
-    # --- PATIČKA ---
-    pdf.ln(10)
+    pdf.set_text_color(*DARK_GREY) # Zpět na šedou
+    
+    # --- TERMÍN DODÁNÍ (Rámeček) ---
+    pdf.ln(15)
+    pdf.set_fill_color(240, 248, 255) # Velmi světlá modrá
+    pdf.set_draw_color(*RENTMIL_BLUE)
+    pdf.rect(10, pdf.get_y(), 190, 20, 'DF')
+    
+    pdf.set_xy(12, pdf.get_y() + 2)
+    pdf.set_font('', 'B', 10)
+    pdf.cell(40, 6, "Termín dodání:", 0, 1)
     pdf.set_font('', '', 10)
-    pdf.multi_cell(0, 5, f"Termín dodání: {zak_udaje['termin']}\n\nPoznámka: Tato nabídka je nezávazná. Pro potvrzení objednávky kontaktujte svého obchodního zástupce.")
+    pdf.set_x(12)
+    pdf.cell(0, 6, f"{zak_udaje['termin']}", 0, 1)
+    pdf.set_x(12)
+    pdf.set_font('', 'I', 8)
+    pdf.cell(0, 6, "Poznámka: Tato nabídka je nezávazná. Pro potvrzení objednávky kontaktujte svého obchodního zástupce.", 0, 1)
     
     return pdf.output(dest='S').encode('latin-1')
 
@@ -274,7 +341,7 @@ def calculate_base_price(model, width, modules, df_c):
 # ==========================================
 # 4. HLAVNÍ APLIKACE
 # ==========================================
-st.title("🛠 Konfigurátor a Cenová nabídka")
+st.title("🛠 Konfigurátor Zastřešení")
 df_c, df_p = load_data()
 
 # --- ZÁKAZNÍK ---
