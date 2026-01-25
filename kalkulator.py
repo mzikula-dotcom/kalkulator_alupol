@@ -9,9 +9,6 @@ st.set_page_config(page_title="Kalkulátor Zastřešení", layout="wide")
 # ==========================================
 # 1. DATA (VLOŽENÁ PŘÍMO V KÓDU)
 # ==========================================
-# Tímto se zbavíme závislosti na externích souborech, které dělaly problémy.
-
-# Ceníky (Textová data z Excelu)
 csv_ceniky_data = """Počet modulů;2;;3;;4;;5;;6;;7;
 Cena;910 Kč;;2 729 Kč;;5 459 Kč;;9 098 Kč;;13 647 Kč;;19 106 Kč;
 ;;;;;;;;;;;;
@@ -82,7 +79,6 @@ Příplatek za antracit elox,5%,5%"""
 @st.cache_data
 def load_data():
     try:
-        # Čtení dat přímo z proměnných výše
         df_c = pd.read_csv(io.StringIO(csv_ceniky_data), sep=';', header=None)
         df_p = pd.read_csv(io.StringIO(csv_priplatky_data), sep=',', header=None)
         return df_c, df_p
@@ -137,8 +133,6 @@ def calculate_base_price(model, width, modules, df_c):
     try:
         mask = df_c[0].astype(str).str.lower() == model.lower()
         if not mask.any(): 
-            # Fallback pro modely, které nejsou v datech nahoře vypsány celé
-            # Použijeme data z PRACTIC, pokud model chybí (pro ukázku funkčnosti)
             mask = df_c[0].astype(str).str.lower() == "practic"
         start_index = df_c.index[mask].tolist()[0]
     except: return 0,0,0, "Model nenalezen"
@@ -179,7 +173,16 @@ with st.sidebar:
     change_color_poly = st.checkbox("Změna barvy polykarbonátu")
 
     st.markdown("---")
-    st.header("3. Doplňky")
+    st.header("3. Úpravy modulů")
+    st.write("**Zkrácení modulů:**")
+    zkraceni_ks = st.number_input("Počet modulů ke zkrácení", 0, moduly, 0)
+    
+    st.write("**Prodloužení modulů:**")
+    prodlouzeni_ks = st.number_input("Počet modulů k prodloužení", 0, moduly, 0)
+    prodlouzeni_mm = st.number_input("Délka prodloužení (mm) / modul", 0, 2000, 0, step=10)
+
+    st.markdown("---")
+    st.header("4. Doplňky")
     pocet_dvere_vc = st.number_input("Dveře v čele (ks)", 0, 2, 0)
     pocet_dvere_bok = st.number_input("Boční vstup (ks)", 0, 4, 0)
     zamykaci_klika = st.checkbox("Zamykací klika (všechny dveře)")
@@ -189,7 +192,7 @@ with st.sidebar:
     podhori = st.checkbox("Zpevnění pro podhorskou oblast")
 
     st.markdown("---")
-    st.header("4. Ostatní")
+    st.header("5. Ostatní")
     km = st.number_input("Doprava (km celkem)", 0, 5000, 0)
     montaz = st.checkbox("Montáž", value=True)
     sleva_pct = st.number_input("Sleva (%)", 0, 100, 0)
@@ -205,132 +208,19 @@ else:
     items.append({"pol": f"Zastřešení {model}", "det": f"{moduly} seg., Š: {sirka}mm", "cen": base_price})
     running = base_price
 
-    # Barvy
-    if "Stříbrný" in barva_typ:
-        val = -10000
-        items.append({"pol": "BONUS: Stříbrný Elox", "det": "", "cen": val})
-        running += val
-    elif "RAL" in barva_typ:
-        val = get_surcharge(df_p, "RAL", is_rock) or 0.20
-        c = base_price * val
-        items.append({"pol": "Příplatek RAL", "det": f"{val*100:.0f}%", "cen": c})
-        running += c
-    elif "Bronz" in barva_typ:
-        val = get_surcharge(df_p, "BR elox", is_rock) or 0.05
-        c = base_price * val
-        items.append({"pol": "Příplatek Bronz", "det": f"{val*100:.0f}%", "cen": c})
-        running += c
-    elif "Antracit" in barva_typ:
-        val = get_surcharge(df_p, "antracit elox", is_rock) or 0.05
-        c = base_price * val
-        items.append({"pol": "Příplatek Antracit", "det": f"{val*100:.0f}%", "cen": c})
-        running += c
-
-    # Polykarbonát
-    roof_a, face_a = calculate_geometry(sirka, height, length)
-    poly_m2 = get_surcharge(df_p, "Plný polykarbonát", is_rock) or 1000
-    if poly_strecha:
-        c = roof_a * poly_m2
-        items.append({"pol": "Plný poly (Střecha)", "det": f"{roof_a:.1f} m²", "cen": c})
-        running += c
-    if poly_cela:
-        c = (face_a * 2) * poly_m2
-        items.append({"pol": "Plný poly (Čela)", "det": f"{face_a*2:.1f} m²", "cen": c})
-        running += c
-    if change_color_poly:
-        val = get_surcharge(df_p, "barvy poly", is_rock) or 0.07
-        c = base_price * val
-        items.append({"pol": "Změna barvy poly", "det": f"{val*100:.0f}%", "cen": c})
-        running += c
-
-    # Podhoří
-    if podhori:
-        val = get_surcharge(df_p, "podhorskou", is_rock) or 0.15
-        c = base_price * val
-        items.append({"pol": "Zpevnění Podhoří", "det": f"{val*100:.0f}%", "cen": c})
-        running += c
-
-    # Dveře
-    doors = []
-    p_vc = get_surcharge(df_p, "Jednokřídlé dveře", is_rock) or 5000
-    p_bok = get_surcharge(df_p, "boční vstup", is_rock) or 7000
-    for _ in range(pocet_dvere_vc): doors.append(("Dveře v čele", p_vc))
-    for _ in range(pocet_dvere_bok): doors.append(("Boční vstup", p_bok))
+    # Úpravy délky (Zkrácení/Prodloužení)
+    if zkraceni_ks > 0:
+        val = get_surcharge(df_p, "Zkrácení modulu", is_rock) or 1500
+        cost = zkraceni_ks * val
+        items.append({"pol": "Zkrácení modulů", "det": f"{zkraceni_ks} ks x {val} Kč", "cen": cost})
+        running += cost
     
-    if doors:
-        doors.sort(key=lambda x: x[1], reverse=True)
-        free = doors.pop(0)
-        items.append({"pol": f"{free[0]} (1. ks)", "det": "ZDARMA", "cen": 0})
-        for n, p in doors:
-            items.append({"pol": n, "det": "Další kus", "cen": p})
-            running += p
-            
-    if zamykaci_klika and (pocet_dvere_vc + pocet_dvere_bok) > 0:
-        cnt = pocet_dvere_vc + pocet_dvere_bok
-        val = get_surcharge(df_p, "Uzamykání dveří", is_rock) or 800
-        c = cnt * val
-        items.append({"pol": "Zamykací klika", "det": f"{cnt} ks", "cen": c})
-        running += c
+    if prodlouzeni_ks > 0 and prodlouzeni_mm > 0:
+        # Cena se skládá z fixního poplatku za modul + ceny za metr délky
+        fix_fee = get_surcharge(df_p, "Prodloužení modulu", is_rock) # Hledá "Prodloužení modulu" (3000)
+        if fix_fee == 0: fix_fee = 3000
         
-    if klapka:
-        val = get_surcharge(df_p, "klapka", is_rock) or 7000
-        items.append({"pol": "Větrací klapka", "det": "", "cen": val})
-        running += val
-
-    # Koleje
-    if pochozi_koleje:
-        m_rail = (length / 1000.0) * 2
-        val = get_surcharge(df_p, "Pochozí kolejnice", is_rock) or 330
-        c = m_rail * val
-        items.append({"pol": "Pochozí koleje", "det": f"{m_rail:.1f} m", "cen": c})
-        running += c
-    if ext_draha_m > 0:
-        m_rail_ext = ext_draha_m * 2
-        val = get_surcharge(df_p, "Jeden metr koleje", is_rock) or 220
-        c = m_rail_ext * val
-        items.append({"pol": "Prodloužení dráhy", "det": f"+{ext_draha_m} m", "cen": c})
-        running += c
-
-    # Montáž
-    c_montaz = 0
-    if montaz:
-        val = get_surcharge(df_p, "Montáž zastřešení v ČR", is_rock) or 0.08
-        c_montaz = running * val
-        items.append({"pol": "Montáž (ČR)", "det": f"{val*100:.0f}% z materiálu", "cen": c_montaz})
-    
-    subtotal = running + c_montaz
-    
-    # Doprava
-    c_doprava = 0
-    if km > 0:
-        c_doprava = km * 18
-        items.append({"pol": "Doprava", "det": f"{km} km", "cen": c_doprava})
+        per_meter = get_surcharge(df_p, "za metr", is_rock) # Hledá "Prodloužení modulu za metr" (2000)
+        if per_meter == 0: per_meter = 2000
         
-    total_no_vat = subtotal + c_doprava
-    
-    # Sleva
-    if sleva_pct > 0:
-        disc = total_no_vat * (sleva_pct / 100.0)
-        items.append({"pol": "SLEVA", "det": f"-{sleva_pct}%", "cen": -disc})
-        total_no_vat -= disc
-
-    # --- VÝPIS ---
-    st.divider()
-    col1, col2 = st.columns([1.5, 1])
-    with col1:
-        st.subheader("Rozpočet")
-        df_show = pd.DataFrame(items)
-        if not df_show.empty:
-            for i, r in df_show.iterrows():
-                c1, c2, c3 = st.columns([4, 2, 2])
-                c1.write(f"**{r['pol']}**")
-                c2.caption(r['det'])
-                c3.write(f"{r['cen']:,.0f} Kč")
-                st.markdown("<hr style='margin: 2px 0; opacity:0.1'>", unsafe_allow_html=True)
-    with col2:
-        st.subheader("Cena celkem")
-        st.metric("Bez DPH", f"{total_no_vat:,.0f} Kč")
-        dph_val = total_no_vat * (dph_sazba / 100.0)
-        st.write(f"DPH ({dph_sazba}%) : {dph_val:,.0f} Kč")
-        st.markdown(f"## {total_no_vat + dph_val:,.0f} Kč")
-        st.caption("s DPH")
+        len_m = prodlouzeni_mm / 10
