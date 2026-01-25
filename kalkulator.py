@@ -1,234 +1,55 @@
 import streamlit as st
 import pandas as pd
 import math
+import io
 
 # --- KONFIGURACE STRÁNKY ---
 st.set_page_config(page_title="Kalkulátor Zastřešení", layout="wide")
 
-# --- INTELIGENTNÍ NAČÍTÁNÍ DAT ---
-def load_csv_robust(filename):
-    """Zkouší různé oddělovače a kódování, dokud nenajde čitelná data."""
-    separators = [';', ',']
-    encodings = ['utf-8', 'cp1250', 'latin1'] # cp1250 je časté pro český Excel
-    
-    for enc in encodings:
-        for sep in separators:
-            try:
-                df = pd.read_csv(filename, sep=sep, header=None, encoding=enc)
-                # Základní kontrola: Musí to mít víc než 1 sloupec, aby to bylo použitelné
-                if df.shape[1] > 1:
-                    return df
-            except:
-                continue
-    return None
+# ==========================================
+# 1. DATA (VLOŽENÁ PŘÍMO V KÓDU)
+# ==========================================
+# Tímto se zbavíme závislosti na externích souborech, které dělaly problémy.
 
-@st.cache_data
-def load_data():
-    df_c = load_csv_robust('ceniky.csv')
-    df_p = load_csv_robust('priplatky.csv')
-    return df_c, df_p
-
-# --- POMOCNÉ FUNKCE ---
-def parse_value(raw_value):
-    """Převede text '15%', '1 500 Kč' nebo '1.500' na číslo."""
-    if pd.isna(raw_value): return 0
-    s = str(raw_value).strip().replace(' ', '').replace('Kč', '').replace('Kc', '')
-    
-    # Procenta
-    if '%' in s:
-        try:
-            return float(s.replace('%', '').replace(',', '.')) / 100.0
-        except: return 0
-    
-    # Čísla
-    try:
-        return float(s.replace(',', '.'))
-    except:
-        return 0
-
-def get_surcharge(df, search_term, is_rock=False):
-    """Najde příplatek. Pokud Rock, hledá ve sloupci 2, jinak 1."""
-    if df is None: return 0
-    
-    # Case-insensitive hledání
-    mask = df[0].astype(str).str.contains(search_term, case=False, na=False)
-    row = df[mask]
-    
-    if row.empty: return 0
-    
-    # Detekce sloupce
-    # Pokud má DF dost sloupců, použijeme index 2 pro Rock
-    col_idx = 2 if (is_rock and row.shape[1] > 2) else 1
-    
-    try:
-        val = row.iloc[0, col_idx]
-        # Pokud je buňka prázdná (NaN), zkusíme fallback na standard (sloupec 1)
-        if pd.isna(val) or str(val).strip() == "":
-            val = row.iloc[0, 1]
-        return parse_value(val)
-    except:
-        # Fallback při chybě indexu
-        try:
-            return parse_value(row.iloc[0, 1])
-        except:
-            return 0
-
-# --- VÝPOČTY ---
-def calculate_geometry(width_mm, height_mm, length_mm):
-    """Spočítá plochu střechy a čel (pro polykarbonát)."""
-    w = width_mm / 1000.0
-    h = height_mm / 1000.0
-    l = length_mm / 1000.0
-    
-    # Aproximace elipsy
-    a = w / 2
-    b = h
-    # Ramanujanův obvod
-    perimeter = math.pi * (3*(a+b) - math.sqrt((3*a + b) * (a + 3*b)))
-    arc_length = perimeter / 2
-    
-    roof_area = arc_length * l
-    face_area = (math.pi * a * b) / 2
-    
-    return roof_area, face_area
-
-def get_length_from_ceniky(df_c, modules):
-    try:
-        # Hledáme v řádku 4 (index 4), sloupec podle modulů
-        col_idx = 1 + (modules - 2) * 2
-        if col_idx < df_c.shape[1]:
-            val = df_c.iloc[4, col_idx]
-            return parse_value(val)
-    except:
-        pass
-    return modules * 2150 # Fallback
-
-def calculate_base_price(model, width, modules, df_c):
-    if df_c is None: return 0,0,0, "Chyba ceníku"
-    
-    # 1. Najít model
-    try:
-        mask = df_c[0].astype(str).str.lower() == model.lower()
-        if not mask.any(): return 0,0,0, f"Model '{model}' nenalezen v ceníku"
-        start_index = df_c.index[mask].tolist()[0]
-    except:
-        return 0,0,0, "Chyba při hledání modelu"
-
-    # 2. Najít řádek (šířka)
-    offset = 1750 if model.upper() == "TERRACE" else 2750
-    if width < (offset + 250):
-        row_shift = 0
-    else:
-        row_shift = math.ceil((width - (offset + 250)) / 250)
-        if row_shift < 0: row_shift = 0
-
-    target_row = start_index + 1 + row_shift
-    
-    # Kontrola, zda jsme nepřejeli konec souboru
-    if target_row >= len(df_c): return 0,0,0, "Šířka mimo rozsah ceníku"
-
-    # 3. Najít sloupec (moduly)
-    col_price = 1 + (modules - 2) * 2
-    col_height = col_price + 1
-    
-    if col_height >= df_c.shape[1]: return 0,0,0, f"Počet modulů {modules} není v ceníku"
-
-    # 4. Číst data
-    try:
-        raw_p = df_c.iloc[target_row, col_price]
-        raw_h = df_c.iloc[target_row, col_height]
-        
-        price = parse_value(raw_p)
-        height = parse_value(raw_h) * 1000
-        length = get_length_from_ceniky(df_c, modules)
-        
-        if price == 0: return 0,0,0, "Cena nenalezena (0)"
-        
-        return price, height, length, None
-    except Exception as e:
-        return 0, 0, 0, f"Chyba čtení dat: {str(e)}"
-
-# --- APLIKACE ---
-st.title("🛠 Kalkulátor Zastřešení 6.0")
-
-df_c, df_p = load_data()
-
-# Diagnostika načtení
-if df_c is None:
-    st.error("❌ Chyba: Soubor 'ceniky.csv' se nepodařilo načíst. Zkontrolujte, zda je nahraný na GitHubu a zda není prázdný.")
-    st.stop()
-if df_p is None:
-    st.error("❌ Chyba: Soubor 'priplatky.csv' se nepodařilo načíst.")
-    st.stop()
-
-# ================= VSTUPY =================
-with st.sidebar:
-    st.header("1. Parametry")
-    model = st.selectbox("Model", ["PRACTIC", "HARMONY", "DREAM", "HORIZONT", "STAR", "ROCK", "TERRACE", "WAVE", "FLASH", "WING", "SUNSET"])
-    is_rock = (model.upper() == "ROCK")
-    
-    sirka = st.number_input("Šířka (mm)", 2000, 9000, 3500, step=10)
-    moduly = st.slider("Počet modulů", 2, 7, 3)
-    
-    st.markdown("---")
-    st.header("2. Konstrukce")
-    barva_typ = st.selectbox("Barva konstrukce", 
-                             ["Stříbrný Elox (Bonus -10 000 Kč)", 
-                              "Bronzový Elox", 
-                              "Antracitový Elox", 
-                              "RAL Nástřik"])
-    
-    st.write("Polykarbonát:")
-    poly_strecha = st.checkbox("Plný polykarbonát - STŘECHA")
-    poly_cela = st.checkbox("Plný polykarbonát - ČELA")
-    change_color_poly = st.checkbox("Změna barvy polykarbonátu")
-    
-    st.markdown("---")
-    st.header("3. Dveře")
-    pocet_dvere_vc = st.number_input("Dveře v čele (ks)", 0, 2, 0)
-    pocet_dvere_bok = st.number_input("Boční vstup (ks)", 0, 4, 0)
-    zamykaci_klika = st.checkbox("Zamykací klika (všechny dveře)")
-    klapka = st.checkbox("Větrací klapka")
-    
-    st.markdown("---")
-    st.header("4. Koleje")
-    pochozi_koleje = st.checkbox("Pochozí koleje")
-    ext_draha_m = st.number_input("Prodloužení dráhy (m)", 0.0, 20.0, 0.0, step=0.5)
-    podhori = st.checkbox("Zpevnění pro podhorskou oblast")
-    
-    st.markdown("---")
-    st.header("5. Ostatní")
-    km = st.number_input("Doprava (km celkem)", 0, 5000, 0)
-    montaz = st.checkbox("Montáž", value=True)
-    sleva_pct = st.number_input("Sleva (%)", 0, 100, 0)
-    dph_sazba = st.selectbox("DPH", [21, 12, 0])
-
-# ================= VÝPOČET =================
-base_price, height, length, err = calculate_base_price(model, sirka, moduly, df_c)
-
-if err:
-    st.error(f"⚠️ Nelze vypočítat cenu: {err}")
-    # Debug info
-    with st.expander("Technické detaily chyby"):
-        st.write(f"Načteno ceníků: {df_c.shape}")
-        st.write(f"Načteno příplatků: {df_p.shape}")
-else:
-    items = []
-    items.append({"pol": f"Zastřešení {model}", "det": f"{moduly} seg., Š: {sirka}mm", "cen": base_price})
-    
-    running = base_price
-    
-    # --- BARVY ---
-    if "Stříbrný" in barva_typ:
-        val = -10000
-        items.append({"pol": "BONUS: Stříbrný Elox", "det": "", "cen": val})
-        running += val
-    elif "RAL" in barva_typ:
-        val = get_surcharge(df_p, "RAL", is_rock) or 0.20
-        c = base_price * val
-        items.append({"pol": "Příplatek RAL", "det": f"{val*100:.0f}%", "cen": c})
-        running += c
-    elif "Bronz" in barva_typ:
-        val = get_surcharge(df_p, "BR elox", is_rock) or 0.05
-        c = base_price * val
-        items.append({"pol":
+# Ceníky (Textová data z Excelu)
+csv_ceniky_data = """Počet modulů;2;;3;;4;;5;;6;;7;
+Cena;910 Kč;;2 729 Kč;;5 459 Kč;;9 098 Kč;;13 647 Kč;;19 106 Kč;
+;;;;;;;;;;;;
+;;;;;;;;;;;;
+Délka zastřešení;4 336;mm;6 446;mm;8 556;mm;10 666;mm;12 776;mm;14 886;mm
+;;;;;;;;;;;;
+;;;;;;;;;;;;
+;;;;;;;;;;;;
+PRACTIC;2;;3;;4;;5;;6;;7;
+do 3 m;60 461;0,91;84 067;0,96;118 839;1,01;148 254;1,06;179 550;1,11;212 648;1,16
+do 3,25 m;63 496;0,98;88 016;1,03;122 330;1,08;152 373;1,13;184 166;1,18;217 770;1,23
+do 3,5 m;66 532;1,05;91 965;1,10;126 931;1,15;157 877;1,20;190 459;1,25;224 879;1,30
+do 3,75 m;72 106;1,12;99 702;1,17;131 130;1,22;162 726;1,27;195 997;1,32;230 901;1,37
+do 4 m;76 766;1,19;106 113;1,24;137 069;1,29;169 747;1,34;204 162;1,39;240 035;1,44
+do 4,25 m;78 944;1,26;108 822;1,31;140 340;1,36;173 518;1,41;208 335;1,46;246 388;1,51
+do 4,5 m;81 853;1,33;112 543;1,38;144 917;1,43;178 905;1,48;214 452;1,53;255 027;1,58
+do 4,75 m;87 470;1,40;119 552;1,45;155 692;1,50;188 648;1,55;225 607;1,60;265 889;1,65
+do 5 m;93 087;1,47;126 561;1,52;166 467;1,57;198 391;1,62;236 762;1,67;276 751;1,72
+do 5,25 m;97 395;1,54;132 255;1,59;171 111;1,64;206 824;1,69;246 599;1,74;287 925;1,79
+do 5,5 m;101 702;1,61;137 949;1,66;175 755;1,71;215 257;1,76;256 437;1,81;299 099;1,86
+HARMONY;2;;3;;4;;5;;6;;7;
+do 3 m;68 337;0,91;95 241;0,96;133 931;1,01;167 447;1,06;203 762;1,11;240 379;1,16
+do 3,25 m;71 372;0,98;99 190;1,03;137 423;1,08;171 566;1,13;208 379;1,18;245 501;1,23
+do 3,5 m;74 407;1,05;103 139;1,10;142 024;1,15;177 070;1,20;214 671;1,25;252 611;1,30
+DREAM;2;;3;;4;;5;;6;;7;
+do 3 m;68 337;0,91;95 241;0,96;133 931;1,01;167 447;1,06;203 762;1,11;240 379;1,16
+do 3,25 m;71 372;0,98;99 190;1,03;137 423;1,08;171 566;1,13;208 379;1,18;245 501;1,23
+HORIZONT;2;;3;;4;;5;;6;;7;
+do 3 m;73 686;0,65;103 133;0,70;146 100;0,75;183 711;0,80;223 533;0,85;263 671;0,90
+do 3,25 m;76 721;0,68;107 082;0,73;149 591;0,78;187 830;0,83;228 149;0,88;268 793;0,93
+STAR;2;;3;;4;;5;;6;;7;
+do 3 m;60 461;0,91;84 067;0,96;118 839;1,01;148 254;1,06;179 550;1,11;212 648;1,16
+do 3,25 m;63 496;0,98;88 016;1,03;122 330;1,08;152 373;1,13;184 166;1,18;217 770;1,23
+ROCK;2;;3;;4;;5;;6;;7;
+do 3 m;68 337;0,91;95 241;0,96;133 931;1,01;167 447;1,06;203 762;1,11;240 379;1,16
+TERRACE;2;;3;;4;;5;;6;;7;
+do 2 m;81 151;2,20;117 726;2,27;150 820;2,33;185 997;2,40;222 908;2,46;260 527;2,53
+do 2,25 m;85 502;2,25;122 482;2,32;155 055;2,38;191 776;2,45;228 691;2,51;268 473;2,58
+do 2,5 m;89 852;2,30;127 239;2,37;159 289;2,43;197 554;2,50;234 473;2,56;276 419;2,63
+do 2,75 m;92 882;2,34;132 623;2,41;165 615;2,47;204 107;2,54;241 393;2,60;284 343;2,67
+do 3 m;95 913;2,38;138 006;2,45;171 941;2,51;2
