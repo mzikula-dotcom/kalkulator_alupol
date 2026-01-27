@@ -31,5 +31,5 @@ RUN playwright install-deps
 
 COPY . .
 
-# Spuštění Streamlit aplikace
-CMD ["streamlit", "run", "app.py", "--server.port=$PORT", "--server.address=0.0.0.0"]
+# Spuštění Streamlit aplikace (OPRAVENO)
+CMD ["sh", "-c", "streamlit run app.py --server.port=$PORT --server.address=0.0.0.0"]
