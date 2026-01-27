@@ -15,7 +15,16 @@ try:
     from playwright.sync_api import sync_playwright
 except ImportError:
     st.error("Chybí knihovna Playwright.")
-
+# --- DIAGNOSTIKA DATABÁZE (VLOŽIT NA ZAČÁTEK POD IMPORTY) ---
+try:
+    test_url = os.environ.get("DATABASE_URL")
+    if test_url:
+        st.success(f"✅ DIAGNOSTIKA: Aplikace vidí databázi! (Začíná: {test_url[:15]}...)")
+    else:
+        st.error("❌ DIAGNOSTIKA: Aplikace NEVIDÍ proměnnou DATABASE_URL. Zkontroluj Railway -> Variables.")
+except Exception as e:
+    st.error(f"❌ DIAGNOSTIKA: Chyba při čtení: {e}")
+# -------------------------------------------------------------
 # --- KONFIGURACE STRÁNKY ---
 st.set_page_config(page_title="Kalkulátor Rentmil", layout="wide", page_icon="🏊‍♂️")
 
