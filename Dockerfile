@@ -20,3 +20,16 @@ RUN apt-get update && apt-get install -y \
 
 # Nastavení pracovního adresáře
 WORKDIR /app
+
+# Kopírování souborů
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Instalace Playwright prohlížečů
+RUN playwright install chromium
+RUN playwright install-deps
+
+COPY . .
+
+# Spuštění Streamlit aplikace
+CMD ["streamlit", "run", "app.py", "--server.port=$PORT", "--server.address=0.0.0.0"]
