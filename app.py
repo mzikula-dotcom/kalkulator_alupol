@@ -3,15 +3,24 @@ import pandas as pd
 import math
 import io
 import os
+import base64
 from datetime import date, timedelta
-from fpdf import FPDF
+from jinja2 import Template
+import asyncio
 
-# --- KONFIGURACE STRÁNKY ---
+# Zkusíme importovat Playwright, pokud selže (lokálně), vyhodí chybu
+try:
+    from playwright.sync_api import sync_playwright
+except ImportError:
+    st.error("Chybí knihovna Playwright. Nainstalujte ji pomocí 'pip install playwright' a 'playwright install'.")
+
+# --- KONFIGURACE ---
 st.set_page_config(page_title="Kalkulátor Rentmil", layout="wide", page_icon="🏊‍♂️")
 
 # ==========================================
-# 1. DATA
+# 1. DATA A POMOCNÉ FUNKCE
 # ==========================================
+# (Data jsou zkrácena pro přehlednost, vlož sem prosím zpět tvá kompletní data CSV stringů z minula)
 csv_ceniky_data = """Počet modulů;2;;3;;4;;5;;6;;7;
 Cena;910 Kč;;2 729 Kč;;5 459 Kč;;9 098 Kč;;13 647 Kč;;19 106 Kč;
 ;;;;;;;;;;;;
@@ -85,219 +94,8 @@ def load_data():
         df_p = pd.read_csv(io.StringIO(csv_priplatky_data), sep=',', header=None)
         return df_c, df_p
     except Exception as e:
-        st.error(f"Chyba dat: {e}")
         return None, None
 
-# ==========================================
-# 2. GENERÁTOR PDF
-# ==========================================
-class PDF(FPDF):
-    def header(self):
-        # Barvy
-        RENTMIL_BLUE = (0, 75, 150)
-        RENTMIL_ORANGE = (240, 120, 0)
-        
-        # Bezpečné načtení obrázků
-        logo_files = ["logo.png", "Logo.png", "LOGO.png", "logo.jpg"]
-        mnich_files = ["mnich.png", "Mnich.png", "MNICH.png", "mnich.jpg"]
-        
-        found_logo = next((f for f in logo_files if os.path.exists(f)), None)
-        found_mnich = next((f for f in mnich_files if os.path.exists(f)), None)
-        
-        if found_logo: self.image(found_logo, 10, 8, 45)
-        if found_mnich: self.image(found_mnich, 170, 8, 30)
-
-        # Nadpis
-        try:
-            self.set_font('DejaVu', 'B', 20)
-        except:
-            self.set_font('Arial', 'B', 20)
-            
-        self.set_text_color(*RENTMIL_BLUE)
-        self.cell(80) 
-        self.cell(30, 10, 'CENOVÁ NABÍDKA', 0, 0, 'C')
-        self.ln(12)
-        
-        # Čára
-        self.set_draw_color(*RENTMIL_ORANGE)
-        self.set_line_width(0.8)
-        self.line(10, 25, 200, 25)
-        self.ln(15)
-
-    def footer(self):
-        RENTMIL_BLUE = (0, 75, 150)
-        self.set_y(-20)
-        self.set_draw_color(*RENTMIL_BLUE)
-        self.set_line_width(0.5)
-        self.line(10, 275, 200, 275)
-        
-        try:
-            self.set_font('DejaVu', '', 8)
-        except:
-            self.set_font('Arial', '', 8)
-            
-        self.set_text_color(100, 100, 100)
-        self.cell(0, 5, 'Rentmil s.r.o. | www.rentmil.cz | bazeny@rentmil.cz', 0, 1, 'C')
-        self.cell(0, 5, f'Strana {self.page_no()}', 0, 0, 'C')
-
-def create_pdf(zak_udaje, items, totals):
-    pdf = PDF()
-    
-    # Fonty - Fallback
-    font_path = "font.ttf"
-    has_font = os.path.exists(font_path)
-    
-    if has_font:
-        pdf.add_font('DejaVu', '', font_path, uni=True)
-        pdf.add_font('DejaVu', 'B', font_path, uni=True)
-        pdf.set_font('DejaVu', '', 10)
-    else:
-        pdf.set_font('Arial', '', 10)
-
-    pdf.add_page()
-    
-    RENTMIL_BLUE = (0, 75, 150)
-    RENTMIL_ORANGE = (240, 120, 0)
-    DARK_GREY = (50, 50, 50)
-    
-    pdf.set_text_color(*DARK_GREY)
-    
-    # --- DODAVATEL / ODBĚRATEL ---
-    x_start = 10
-    y_start = 35
-    pdf.set_xy(x_start, y_start)
-    
-    pdf.set_font('', 'B', 11)
-    pdf.set_text_color(*RENTMIL_BLUE)
-    pdf.cell(90, 6, "DODAVATEL:", 0, 1)
-    pdf.set_text_color(*DARK_GREY)
-    
-    pdf.set_font('', 'B', 10)
-    pdf.cell(90, 5, "Rentmil s.r.o.", 0, 1)
-    pdf.set_font('', '', 9)
-    pdf.cell(90, 5, "Lidická 1233/26, 323 00 Plzeň", 0, 1)
-    pdf.cell(90, 5, "IČO: 26342910, DIČ: CZ26342910", 0, 1)
-    pdf.cell(90, 5, "Tel: 737 222 004, 377 530 806", 0, 1)
-    pdf.cell(90, 5, "Email: bazeny@rentmil.cz", 0, 1)
-    pdf.cell(90, 5, "Web: www.rentmil.cz", 0, 1)
-    
-    pdf.ln(3)
-    pdf.set_font('', 'B', 9)
-    
-    # Ošetření češtiny pokud chybí font
-    vypracoval_txt = zak_udaje['vypracoval'] if has_font else "Vypracoval"
-    pdf.cell(90, 5, f"Vypracoval: {vypracoval_txt}", 0, 1)
-    
-    # Odběratel
-    pdf.set_xy(110, y_start)
-    pdf.set_font('', 'B', 11)
-    pdf.set_text_color(*RENTMIL_BLUE)
-    pdf.cell(90, 6, "ODBĚRATEL:", 0, 1)
-    pdf.set_text_color(*DARK_GREY)
-    
-    pdf.set_font('', 'B', 11)
-    pdf.set_x(110)
-    
-    # Fallback pro jméno bez diakritiky
-    jmeno_txt = zak_udaje['jmeno'] if has_font else "Zakaznik"
-    pdf.cell(90, 6, jmeno_txt, 0, 1)
-    
-    pdf.set_font('', '', 10)
-    pdf.set_x(110)
-    
-    adr_txt = zak_udaje['adresa'] if has_font else ""
-    pdf.multi_cell(80, 5, f"{adr_txt}\n\nTel: {zak_udaje['tel']}\nEmail: {zak_udaje['email']}")
-    
-    pdf.set_xy(110, y_start + 40)
-    pdf.set_font('', 'B', 9)
-    pdf.cell(40, 5, "Datum vystavení:", 0, 0)
-    pdf.set_font('', '', 9)
-    pdf.cell(40, 5, f"{zak_udaje['datum']}", 0, 1)
-    
-    pdf.set_x(110)
-    pdf.set_font('', 'B', 9)
-    pdf.cell(40, 5, "Platnost nabídky:", 0, 0)
-    pdf.set_font('', '', 9)
-    pdf.cell(40, 5, f"{zak_udaje['platnost']}", 0, 1)
-    
-    pdf.ln(10)
-    
-    # --- TABULKA ---
-    pdf.set_fill_color(*RENTMIL_BLUE)
-    pdf.set_text_color(255, 255, 255)
-    pdf.set_font('', 'B', 10)
-    pdf.cell(90, 8, " Položka", 0, 0, 'L', True)
-    pdf.cell(60, 8, " Detail", 0, 0, 'L', True)
-    pdf.cell(40, 8, "Cena (Kč) ", 0, 1, 'R', True)
-    
-    pdf.set_text_color(*DARK_GREY)
-    pdf.set_font('', '', 10)
-    
-    fill = False
-    for item in items:
-        if fill: pdf.set_fill_color(245, 245, 245)
-        else: pdf.set_fill_color(255, 255, 255)
-        
-        # Odstranění diakritiky pokud chybí font
-        pol_txt = item['pol'] if has_font else item['pol'].encode('ascii', 'ignore').decode()
-        det_txt = item['det'] if has_font else item['det'].encode('ascii', 'ignore').decode()
-        
-        pdf.cell(90, 7, " " + pol_txt, 0, 0, 'L', True)
-        pdf.cell(60, 7, " " + det_txt, 0, 0, 'L', True)
-        pdf.cell(40, 7, f"{item['cen']:,.0f} ".replace(',', ' '), 0, 1, 'R', True)
-        
-        pdf.set_draw_color(230, 230, 230)
-        pdf.line(10, pdf.get_y(), 200, pdf.get_y())
-        fill = not fill
-
-    pdf.ln(5)
-    
-    # --- SOUČTY ---
-    pdf.set_x(110)
-    pdf.set_font('', '', 10)
-    pdf.cell(50, 6, "Cena bez DPH:", 0, 0, 'R')
-    pdf.cell(30, 6, f"{totals['bez_dph']:,.0f} Kč".replace(',', ' '), 0, 1, 'R')
-    
-    pdf.set_x(110)
-    pdf.cell(50, 6, f"DPH ({totals['sazba_dph']}%):", 0, 0, 'R')
-    pdf.cell(30, 6, f"{totals['dph']:,.0f} Kč".replace(',', ' '), 0, 1, 'R')
-    
-    pdf.ln(3)
-    pdf.set_x(110)
-    pdf.set_font('', 'B', 14)
-    pdf.set_text_color(*RENTMIL_ORANGE)
-    pdf.cell(50, 10, "CELKEM K ÚHRADĚ:", 0, 0, 'R')
-    pdf.cell(30, 10, f"{totals['s_dph']:,.0f} Kč".replace(',', ' '), 0, 1, 'R')
-    
-    pdf.set_text_color(*DARK_GREY)
-    
-    # --- PATIČKA DODÁNÍ ---
-    pdf.ln(15)
-    pdf.set_fill_color(240, 248, 255)
-    pdf.set_draw_color(*RENTMIL_BLUE)
-    pdf.rect(10, pdf.get_y(), 190, 20, 'DF')
-    
-    pdf.set_xy(12, pdf.get_y() + 2)
-    pdf.set_font('', 'B', 10)
-    txt_termin = "Termín dodání:" if has_font else "Termin dodani:"
-    pdf.cell(40, 6, txt_termin, 0, 1)
-    
-    pdf.set_font('', '', 10) 
-    pdf.set_x(12)
-    term_val = zak_udaje['termin'] if has_font else "Dle dohody"
-    pdf.cell(0, 6, term_val, 0, 1)
-    
-    pdf.set_x(12)
-    # Poznámka dole - obyčejné písmo
-    pdf.set_font('', '', 8) 
-    note = "Poznámka: Tato nabídka je nezávazná. Pro potvrzení kontaktujte svého obchodního zástupce." if has_font else "Poznamka: Tato nabidka je nezavazna."
-    pdf.cell(0, 6, note, 0, 1)
-    
-    return pdf.output(dest='S').encode('latin-1')
-
-# ==========================================
-# 3. POMOCNÉ FUNKCE
-# ==========================================
 def parse_value(raw_value):
     if pd.isna(raw_value): return 0
     s = str(raw_value).strip().replace(' ', '').replace('Kč', '').replace('Kc', '')
@@ -359,6 +157,147 @@ def calculate_base_price(model, width, modules, df_c):
         if price == 0: return 0,0,0, "Cena 0 nebo mimo rozsah"
         return price, height, length, None
     except: return 0,0,0, "Mimo rozsah"
+
+# ==========================================
+# 2. HTML PDF GENERÁTOR (RENTMIL STYL)
+# ==========================================
+def img_to_base64(img_path):
+    if os.path.exists(img_path):
+        with open(img_path, "rb") as img_file:
+            return base64.b64encode(img_file.read()).decode('utf-8')
+    return None
+
+def generate_pdf_html(zak_udaje, items, totals):
+    # Převod obrázků na Base64 pro vložení do HTML
+    logo_b64 = img_to_base64("logo.png") or img_to_base64("Logo.png")
+    mnich_b64 = img_to_base64("mnich.png") or img_to_base64("Mnich.png")
+    
+    # HTML Šablona
+    html_template = """
+    <!DOCTYPE html>
+    <html lang="cs">
+    <head>
+        <meta charset="UTF-8">
+        <style>
+            @page { margin: 2cm; size: A4; }
+            body { font-family: 'Helvetica', 'Arial', sans-serif; color: #333; font-size: 14px; line-height: 1.4; }
+            .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+            .logo { max-width: 250px; }
+            .mnich { max-width: 100px; }
+            .title { text-align: center; color: #004b96; font-size: 28px; font-weight: bold; margin-top: 10px; margin-bottom: 10px; }
+            .divider { border-bottom: 3px solid #f07800; margin-bottom: 30px; }
+            
+            .info-grid { display: flex; justify-content: space-between; margin-bottom: 30px; }
+            .col { width: 48%; }
+            .col-header { color: #004b96; font-weight: bold; font-size: 16px; margin-bottom: 5px; border-bottom: 1px solid #ddd; padding-bottom: 5px; }
+            .info-text { margin: 2px 0; }
+            
+            .items-table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
+            .items-table th { background-color: #004b96; color: white; padding: 10px; text-align: left; }
+            .items-table td { padding: 10px; border-bottom: 1px solid #eee; }
+            .items-table tr:nth-child(even) { background-color: #f9f9f9; }
+            .price-col { text-align: right; white-space: nowrap; }
+            
+            .totals { float: right; width: 40%; text-align: right; }
+            .total-row { display: flex; justify-content: space-between; margin: 5px 0; }
+            .grand-total { font-size: 24px; color: #f07800; font-weight: bold; margin-top: 10px; }
+            
+            .footer { clear: both; margin-top: 50px; padding-top: 20px; border-top: 1px solid #004b96; font-size: 12px; color: #666; }
+            .note { background-color: #e6f2ff; padding: 15px; border-left: 5px solid #004b96; margin-top: 20px; font-style: italic; }
+        </style>
+    </head>
+    <body>
+        <div class="header">
+            {% if logo_b64 %}<img src="data:image/png;base64,{{ logo_b64 }}" class="logo">{% else %}<h1>Rentmil s.r.o.</h1>{% endif %}
+            {% if mnich_b64 %}<img src="data:image/png;base64,{{ mnich_b64 }}" class="mnich">{% endif %}
+        </div>
+        
+        <div class="title">CENOVÁ NABÍDKA</div>
+        <div class="divider"></div>
+        
+        <div class="info-grid">
+            <div class="col">
+                <div class="col-header">DODAVATEL</div>
+                <div class="info-text"><strong>Rentmil s.r.o.</strong></div>
+                <div class="info-text">Lidická 1233/26, 323 00 Plzeň</div>
+                <div class="info-text">IČO: 26342910, DIČ: CZ26342910</div>
+                <div class="info-text">Tel: 737 222 004, 377 530 806</div>
+                <div class="info-text">Email: bazeny@rentmil.cz</div>
+                <div class="info-text">Web: www.rentmil.cz</div>
+                <br>
+                <div class="info-text">Vypracoval: <strong>{{ data.vypracoval }}</strong></div>
+            </div>
+            <div class="col">
+                <div class="col-header">ODBĚRATEL</div>
+                <div class="info-text"><strong>{{ data.jmeno }}</strong></div>
+                <div class="info-text">{{ data.adresa }}</div>
+                <div class="info-text">Tel: {{ data.tel }}</div>
+                <div class="info-text">Email: {{ data.email }}</div>
+                <br>
+                <div class="info-text">Datum vystavení: {{ data.datum }}</div>
+                <div class="info-text">Platnost do: {{ data.platnost }}</div>
+            </div>
+        </div>
+        
+        <table class="items-table">
+            <thead>
+                <tr>
+                    <th width="50%">Položka</th>
+                    <th width="30%">Detail</th>
+                    <th width="20%" class="price-col">Cena</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for item in items %}
+                <tr>
+                    <td><strong>{{ item.pol }}</strong></td>
+                    <td>{{ item.det }}</td>
+                    <td class="price-col">{{ "{:,.0f}".format(item.cen).replace(',', ' ') }} Kč</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        
+        <div class="totals">
+            <div class="total-row">
+                <span>Cena bez DPH:</span>
+                <span>{{ "{:,.0f}".format(totals.bez_dph).replace(',', ' ') }} Kč</span>
+            </div>
+            <div class="total-row">
+                <span>DPH ({{ totals.sazba_dph }}%):</span>
+                <span>{{ "{:,.0f}".format(totals.dph).replace(',', ' ') }} Kč</span>
+            </div>
+            <div class="grand-total">
+                {{ "{:,.0f}".format(totals.s_dph).replace(',', ' ') }} Kč
+            </div>
+        </div>
+        
+        <div class="footer" style="clear: both;">
+            <div class="note">
+                <strong>Termín dodání:</strong> {{ data.termin }}<br>
+                Poznámka: Tato nabídka je nezávazná. Pro potvrzení objednávky kontaktujte svého obchodního zástupce.
+            </div>
+            <br>
+            <center>Rentmil s.r.o. | www.rentmil.cz | bazeny@rentmil.cz</center>
+        </div>
+    </body>
+    </html>
+    """
+    
+    template = Template(html_template)
+    html_content = template.render(data=zak_udaje, items=items, totals=totals, logo_b64=logo_b64, mnich_b64=mnich_b64)
+    
+    # Playwright rendering
+    with sync_playwright() as p:
+        # Spuštění prohlížeče (Chromium)
+        browser = p.chromium.launch()
+        page = browser.new_page()
+        page.set_content(html_content)
+        # Tisk do PDF (formát A4)
+        pdf_bytes = page.pdf(format="A4", print_background=True, margin={"top": "0cm", "right": "0cm", "bottom": "0cm", "left": "0cm"})
+        browser.close()
+        
+    return pdf_bytes
 
 # ==========================================
 # 4. HLAVNÍ APLIKACE
@@ -578,10 +517,10 @@ else:
             }
             totals = {'bez_dph': total_no_vat, 'dph': dph_val, 's_dph': total_with_vat, 'sazba_dph': dph_sazba}
             try:
-                pdf_data = create_pdf(zak_udaje, items, totals)
-                st.download_button("📄 Stáhnout Nabídku (PDF)", data=pdf_data, file_name=f"Nabidka_{zak_jmeno.replace(' ','_')}.pdf", mime="application/pdf", type="primary")
+                # Volání Playwright generátoru
+                pdf_data = generate_pdf_html(zak_udaje, items, totals)
+                st.download_button("📄 Stáhnout Nabídku (Profi PDF)", data=pdf_data, file_name=f"Nabidka_{zak_jmeno.replace(' ','_')}.pdf", mime="application/pdf", type="primary")
             except Exception as e:
                 st.error(f"Chyba PDF: {e}")
-                st.write(str(e))
         else:
             st.info("Pro stažení PDF vyplňte jméno zákazníka.")
