@@ -2,3 +2,5 @@ streamlit
 pandas
 jinja2
 playwright
+sqlalchemy
+psycopg2-binary
