@@ -89,7 +89,7 @@ def load_data():
         return None, None
 
 # ==========================================
-# 2. GENERÁTOR PDF (RENTMIL DESIGN)
+# 2. GENERÁTOR PDF
 # ==========================================
 class PDF(FPDF):
     def header(self):
@@ -282,13 +282,13 @@ def create_pdf(zak_udaje, items, totals):
     txt_termin = "Termín dodání:" if has_font else "Termin dodani:"
     pdf.cell(40, 6, txt_termin, 0, 1)
     
-    pdf.set_font('', '', 10) # <-- ZMĚNA: Použito obyčejné písmo, ne kurzíva 'I'
+    pdf.set_font('', '', 10) 
     pdf.set_x(12)
     term_val = zak_udaje['termin'] if has_font else "Dle dohody"
     pdf.cell(0, 6, term_val, 0, 1)
     
     pdf.set_x(12)
-    # Poznámka dole - také obyčejné písmo (nebo Bold 'B', ale ne 'I')
+    # Poznámka dole - obyčejné písmo
     pdf.set_font('', '', 8) 
     note = "Poznámka: Tato nabídka je nezávazná. Pro potvrzení kontaktujte svého obchodního zástupce." if has_font else "Poznamka: Tato nabidka je nezavazna."
     pdf.cell(0, 6, note, 0, 1)
@@ -449,8 +449,8 @@ else:
 
     # Barvy
     if "Stříbrný" in barva_typ:
-        val = -10000
-        items.append({"pol": "BONUS: Stříbrný Elox", "det": "", "cen": val})
+        val = base_price * -0.10 # SLEVA 10%
+        items.append({"pol": "BONUS: Stříbrný Elox", "det": "Sleva 10%", "cen": val})
         running += val
     elif "RAL" in barva_typ:
         val = get_surcharge(df_p, "RAL", is_rock) or 0.20
