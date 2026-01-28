@@ -75,7 +75,7 @@ if db_url:
 # 2. POMOCNÉ FUNKCE
 # ########################################
 def parse_value_clean(val):
-    if pd.isna(val) or val == "": return 0
+    if pd.isna(val) or str(val).strip() == "": return 0
     s = str(val).strip().replace(' ', '').replace('Kč', '').replace('Kc', '').replace('\xa0', '')
     if '%' in s: return float(s.replace('%', '').replace(',', '.')) / 100.0
     try: return float(s.replace(',', '.'))
@@ -104,12 +104,9 @@ def calculate_base_price_db(model, width_mm, modules):
     if not SessionLocal: return 0,0,0, "DB Error"
     session = SessionLocal()
     try:
-        # Hledáme cenu
         count = session.query(Cenik).filter(Cenik.model == model).count()
         if count == 0: 
-            # Pokud model v DB není, zkusíme fallback na PRACTIC jen pro test
             if model == "PRACTIC": return 0,0,0, "Ceník je prázdný!"
-            # model = "PRACTIC" # (Volitelné: vypnuto, chceme vidět chybu u konkrétního modelu)
         
         row = session.query(Cenik).filter(
             Cenik.model == model,
@@ -121,7 +118,6 @@ def calculate_base_price_db(model, width_mm, modules):
             length = modules * 2150 
             return row.cena, row.vyska * 1000, length, None
         else:
-            # Zkusíme najít maximální šířku pro tento model, abychom dali lepší chybovou hlášku
             max_row = session.query(Cenik).filter(Cenik.model == model, Cenik.moduly == modules).order_by(Cenik.sirka_mm.desc()).first()
             if max_row:
                 return 0, 0, 0, f"Mimo rozsah (Max pro {model} je {max_row.sirka_mm} mm)"
@@ -311,52 +307,90 @@ def generate_pdf_html(zak_udaje, items, totals):
 st.sidebar.title("Navigace")
 page_mode = st.sidebar.radio("Režim:", ["Kalkulátor", "Historie Nabídek"])
 
-# --- SERVISNÍ ZÓNA ---
-with st.sidebar.expander("🔐 Servisní zóna (Ceníky)"):
-    st.warning("Zde můžeš aktualizovat ceník.")
-    import_data = st.text_area("Vlož CSV data (formát 'Model;...\\n do 3m;...')", height=150)
+# --- SERVISNÍ ZÓNA (NOVÁ VERZE S TABS) ---
+with st.sidebar.expander("🔐 Servisní zóna (Admin)"):
+    tab_modely, tab_priplatky = st.tabs(["🏠 Ceníky Modelů", "➕ Příplatky"])
     
-    if st.button("⚠️ Smazat staré a nahrát nové"):
-        if not import_data.strip():
-            st.error("Vlož nejprve data!")
-        else:
-            if SessionLocal:
+    # 1. TAB MODELY
+    with tab_modely:
+        st.caption("Formát: 'Model;...\\n do 3m;...'")
+        import_data_models = st.text_area("CSV Modely", height=150, key="imp_models")
+        if st.button("⚠️ Nahrát Modely"):
+            if not import_data_models.strip():
+                st.error("Vlož data!")
+            elif SessionLocal:
                 session = SessionLocal()
                 try:
-                    # 1. Smazat staré
                     session.query(Cenik).delete()
-                    
-                    # 2. Parsrovat nové (z Text Area)
-                    df_c = pd.read_csv(io.StringIO(import_data), sep=';', header=None)
+                    df_c = pd.read_csv(io.StringIO(import_data_models), sep=';', header=None)
                     current_model = None
                     counter = 0
-                    
                     for idx, row in df_c.iterrows():
                         first_col = str(row[0]).strip()
-                        # Detekce modelu
                         if first_col.upper() in ["PRACTIC", "HARMONY", "DREAM", "HORIZONT", "STAR", "ROCK", "TERRACE"]:
                             current_model = first_col.upper()
                             continue
-                        
                         if current_model and first_col.startswith("do "):
-                            rozmer_txt = first_col.replace("do ", "").replace(" m", "").replace(",", ".")
                             try:
-                                sirka_mm = int(float(rozmer_txt) * 1000)
+                                sirka_mm = int(float(first_col.replace("do ", "").replace(" m", "").replace(",", ".")) * 1000)
                             except: continue
-                            
                             for mod_i in range(2, 8):
-                                col_idx_price = 1 + (mod_i - 2) * 2
-                                col_idx_height = col_idx_price + 1
-                                if col_idx_price < len(row):
-                                    cena = parse_value_clean(row[col_idx_price])
-                                    vyska = parse_value_clean(row[col_idx_height] if col_idx_height < len(row) else 0)
+                                col_p = 1 + (mod_i - 2) * 2
+                                col_h = col_p + 1
+                                if col_p < len(row):
+                                    cena = parse_value_clean(row[col_p])
+                                    vyska = parse_value_clean(row[col_h] if col_h < len(row) else 0)
                                     if cena > 0:
-                                        item = Cenik(model=current_model, sirka_mm=sirka_mm, moduly=mod_i, cena=cena, vyska=vyska, delka_fix=0)
-                                        session.add(item)
+                                        session.add(Cenik(model=current_model, sirka_mm=sirka_mm, moduly=mod_i, cena=cena, vyska=vyska, delka_fix=0))
                                         counter += 1
+                    session.commit()
+                    st.success(f"Nahráno {counter} cen modelů.")
+                except Exception as e:
+                    session.rollback()
+                    st.error(f"Chyba: {e}")
+                finally:
+                    session.close()
+
+    # 2. TAB PŘÍPLATKY
+    with tab_priplatky:
+        st.caption("Formát: 'Název; Cena Standard; Cena Rock'")
+        import_data_extras = st.text_area("CSV Příplatky", height=150, key="imp_extras")
+        if st.button("⚠️ Nahrát Příplatky"):
+            if not import_data_extras.strip():
+                st.error("Vlož data!")
+            elif SessionLocal:
+                session = SessionLocal()
+                try:
+                    session.query(Priplatek).delete()
+                    # Zde používáme středník jako oddělovač
+                    df_p = pd.read_csv(io.StringIO(import_data_extras), sep=';', header=None)
+                    counter = 0
+                    for _, row in df_p.iterrows():
+                        nazev = str(row[0]).strip()
+                        if not nazev or pd.isna(nazev): continue
+                        
+                        # Standard
+                        val_std = row[1]
+                        val_std_clean = parse_value_clean(val_std)
+                        is_pct_std = isinstance(val_std, str) and '%' in val_std
+                        
+                        p_std = Priplatek(nazev=nazev, cena_pct=val_std_clean if is_pct_std else 0, cena_fix=val_std_clean if not is_pct_std else 0, kategorie="Standard")
+                        session.add(p_std)
+                        counter += 1
+
+                        # Rock (pokud je)
+                        if len(row) > 2:
+                            val_rock = row[2]
+                            if pd.isna(val_rock) or str(val_rock).strip() == "": val_rock = val_std
+                            val_rock_clean = parse_value_clean(val_rock)
+                            is_pct_rock = isinstance(val_rock, str) and '%' in val_rock
+                            
+                            p_rock = Priplatek(nazev=nazev, cena_pct=val_rock_clean if is_pct_rock else 0, cena_fix=val_rock_clean if not is_pct_rock else 0, kategorie="Rock")
+                            session.add(p_rock)
+                            counter += 1
                     
                     session.commit()
-                    st.success(f"Hotovo! Nahráno {counter} cen.")
+                    st.success(f"Nahráno {counter} položek příplatků.")
                 except Exception as e:
                     session.rollback()
                     st.error(f"Chyba: {e}")
@@ -406,7 +440,6 @@ else:
             return st.session_state['form_data'][key]
         return default
 
-    # --- INPUTY ---
     with st.expander("👤 Údaje o zákazníkovi a nabídce", expanded=True):
         col_cust1, col_cust2 = st.columns(2)
         with col_cust1:
