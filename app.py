@@ -5,10 +5,12 @@ import io
 import os
 import base64
 import json
+import re
 from datetime import date, timedelta, datetime
 from jinja2 import Template
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Text, inspect
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Text, inspect, Boolean
 from sqlalchemy.orm import sessionmaker, declarative_base
+from sqlalchemy import func
 
 # Zkusíme importovat Playwright
 try:
@@ -20,93 +22,10 @@ except ImportError:
 st.set_page_config(page_title="Kalkulátor Rentmil", layout="wide", page_icon="🏊‍♂️")
 
 # ########################################
-# 1. DATABÁZE A MODELY
+# 1. STARÁ DATA (JEN PRO PRVNÍ IMPORT)
 # ########################################
-
-# Inicializace Session State pro přenos dat z historie
-if 'form_data' not in st.session_state:
-    st.session_state['form_data'] = {}
-
-Base = declarative_base()
-
-class Nabidka(Base):
-    __tablename__ = 'nabidky'
-    id = Column(Integer, primary_key=True)
-    datum_vytvoreni = Column(DateTime, default=datetime.utcnow)
-    zakaznik = Column(String)
-    model = Column(String)
-    cena_celkem = Column(Float)
-    data_json = Column(Text) # Zde uložíme kompletní nastavení formuláře
-
-# Připojení k DB
-db_url = os.environ.get("DATABASE_URL")
-engine = None
-SessionLocal = None
-
-if db_url:
-    # Oprava pro SQLAlchemy (Railway používá postgres:// ale knihovna chce postgresql://)
-    if db_url.startswith("postgres://"):
-        db_url = db_url.replace("postgres://", "postgresql://", 1)
-    
-    try:
-        engine = create_engine(db_url)
-        SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-        
-        # Vytvoření tabulek, pokud neexistují
-        # Jednoduchá kontrola, abychom nezdržovali start
-        insp = inspect(engine)
-        if not insp.has_table("nabidky"):
-            Base.metadata.create_all(bind=engine)
-            print("Tabulka 'nabidky' vytvořena.")
-    except Exception as e:
-        st.error(f"Chyba připojení k databázi: {e}")
-
-# Funkce pro práci s DB
-def save_offer_to_db(data_dict, total_price):
-    if not SessionLocal: return False, "Databáze není připojena."
-    session = SessionLocal()
-    try:
-        # Převedeme data formuláře na JSON string
-        json_str = json.dumps(data_dict, default=str)
-        
-        nova_nabidka = Nabidka(
-            zakaznik=data_dict.get('zak_jmeno', 'Neznámý'),
-            model=data_dict.get('model', '-'),
-            cena_celkem=total_price,
-            data_json=json_str,
-            datum_vytvoreni=datetime.now()
-        )
-        session.add(nova_nabidka)
-        session.commit()
-        return True, "Uloženo."
-    except Exception as e:
-        return False, str(e)
-    finally:
-        session.close()
-
-def get_all_offers():
-    if not SessionLocal: return []
-    session = SessionLocal()
-    try:
-        offers = session.query(Nabidka).order_by(Nabidka.datum_vytvoreni.desc()).all()
-        return offers
-    finally:
-        session.close()
-
-def delete_offer(offer_id):
-    if not SessionLocal: return
-    session = SessionLocal()
-    try:
-        offer = session.query(Nabidka).filter(Nabidka.id == offer_id).first()
-        if offer:
-            session.delete(offer)
-            session.commit()
-    finally:
-        session.close()
-
-# ########################################
-# 2. DATA (CENÍKY)
-# ########################################
+# Tyto řetězce tu necháme jen proto, aby se z nich naplnila databáze.
+# Jakmile bude DB plná, aplikace je bude ignorovat.
 csv_ceniky_data = """Počet modulů;2;;3;;4;;5;;6;;7;
 Cena;910 Kč;;2 729 Kč;;5 459 Kč;;9 098 Kč;;13 647 Kč;;19 106 Kč;
 ;;;;;;;;;;;;
@@ -173,40 +92,267 @@ Příplatek za BR elox,5%,5%,
 Příplatek za RAL nástřik,20%,20%,
 Příplatek za antracit elox,5%,5%"""
 
-@st.cache_data
-def load_data():
+# ########################################
+# 2. DATABÁZE A MODELY
+# ########################################
+
+if 'form_data' not in st.session_state:
+    st.session_state['form_data'] = {}
+
+Base = declarative_base()
+
+class Nabidka(Base):
+    __tablename__ = 'nabidky'
+    id = Column(Integer, primary_key=True)
+    datum_vytvoreni = Column(DateTime, default=datetime.utcnow)
+    zakaznik = Column(String)
+    model = Column(String)
+    cena_celkem = Column(Float)
+    data_json = Column(Text)
+
+# --- NOVÉ TABULKY ---
+class Cenik(Base):
+    __tablename__ = 'cenik'
+    id = Column(Integer, primary_key=True)
+    model = Column(String)       # Např. PRACTIC
+    sirka_mm = Column(Integer)   # Horní limit šířky v mm (např. 3000 pro "do 3 m")
+    moduly = Column(Integer)     # Počet modulů (2, 3...)
+    cena = Column(Float)         # Cena
+    vyska = Column(Float)        # Výška
+    delka_fix = Column(Float)    # Fixní délka (pokud je)
+
+class Priplatek(Base):
+    __tablename__ = 'priplatky'
+    id = Column(Integer, primary_key=True)
+    nazev = Column(String)       # Např. "Jednokřídlé dveře"
+    cena_fix = Column(Float)     # Pokud je cena fixní (např. 5000)
+    cena_pct = Column(Float)     # Pokud je cena procentem (např. 0.05)
+    kategorie = Column(String)   # "Rock" nebo "Standard"
+
+db_url = os.environ.get("DATABASE_URL")
+engine = None
+SessionLocal = None
+
+if db_url:
+    if db_url.startswith("postgres://"):
+        db_url = db_url.replace("postgres://", "postgresql://", 1)
+    
     try:
-        df_c = pd.read_csv(io.StringIO(csv_ceniky_data), sep=';', header=None)
-        df_p = pd.read_csv(io.StringIO(csv_priplatky_data), sep=',', header=None)
-        return df_c, df_p
+        engine = create_engine(db_url)
+        SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+        Base.metadata.create_all(bind=engine)
     except Exception as e:
-        return None, None
+        st.error(f"Chyba DB: {e}")
 
 # ########################################
-# 3. LOGIKA VÝPOČTŮ
+# 3. MIGRACE DAT (IMPORT Z CSV DO DB)
 # ########################################
-def parse_value(raw_value):
-    if pd.isna(raw_value): return 0
-    s = str(raw_value).strip().replace(' ', '').replace('Kč', '').replace('Kc', '')
-    if '%' in s:
-        try: return float(s.replace('%', '').replace(',', '.')) / 100.0
-        except: return 0
+def parse_value_clean(val):
+    if pd.isna(val) or val == "": return 0
+    s = str(val).strip().replace(' ', '').replace('Kč', '').replace('Kc', '')
+    if '%' in s: return float(s.replace('%', '').replace(',', '.')) / 100.0
     try: return float(s.replace(',', '.'))
     except: return 0
 
-def get_surcharge(df, search_term, is_rock=False):
-    if df is None: return 0
-    mask = df[0].astype(str).str.contains(search_term, case=False, na=False)
-    row = df[mask]
-    if row.empty: return 0
-    col_idx = 2 if (is_rock and row.shape[1] > 2) else 1
-    try:
-        val = row.iloc[0, col_idx]
-        if pd.isna(val) or str(val).strip() == "": val = row.iloc[0, 1]
-        return parse_value(val)
-    except:
-        return parse_value(row.iloc[0, 1])
+def seed_database():
+    """Naplní databázi daty z CSV řetězců, pokud je tabulka prázdná."""
+    if not SessionLocal: return
+    session = SessionLocal()
+    
+    # 1. Kontrola, zda máme data v Ceníku
+    if session.query(Cenik).count() > 0:
+        session.close()
+        return # Už je naplněno
+    
+    st.info("🔄 Provádím prvotní import ceníků do databáze... Čekejte.")
 
+    try:
+        # --- IMPORT PŘÍPLATKŮ ---
+        df_p = pd.read_csv(io.StringIO(csv_priplatky_data), sep=',', header=None)
+        for _, row in df_p.iterrows():
+            nazev = str(row[0]).strip()
+            if not nazev or pd.isna(nazev): continue
+            
+            # Standard
+            val_std = row[1]
+            if isinstance(val_std, str) and '%' in val_std:
+                p_std = Priplatek(nazev=nazev, cena_pct=parse_value_clean(val_std), cena_fix=0, kategorie="Standard")
+            else:
+                p_std = Priplatek(nazev=nazev, cena_fix=parse_value_clean(val_std), cena_pct=0, kategorie="Standard")
+            session.add(p_std)
+
+            # Rock (sloupec 2) - pokud existuje a není prázdný
+            if len(row) > 2:
+                val_rock = row[2]
+                if pd.isna(val_rock) or str(val_rock).strip() == "": val_rock = val_std # Fallback na standard
+                
+                if isinstance(val_rock, str) and '%' in val_rock:
+                    p_rock = Priplatek(nazev=nazev, cena_pct=parse_value_clean(val_rock), cena_fix=0, kategorie="Rock")
+                else:
+                    p_rock = Priplatek(nazev=nazev, cena_fix=parse_value_clean(val_rock), cena_pct=0, kategorie="Rock")
+                session.add(p_rock)
+        
+        # --- IMPORT CENÍKŮ MODELŮ ---
+        df_c = pd.read_csv(io.StringIO(csv_ceniky_data), sep=';', header=None)
+        
+        current_model = None
+        
+        for idx, row in df_c.iterrows():
+            first_col = str(row[0]).strip()
+            
+            # Detekce modelu (řádek obsahuje jen název a pak moduly 2, 3...)
+            if first_col.upper() in ["PRACTIC", "HARMONY", "DREAM", "HORIZONT", "STAR", "ROCK", "TERRACE"]:
+                current_model = first_col.upper()
+                continue
+            
+            # Pokud máme model a řádek začíná "do X m"
+            if current_model and first_col.startswith("do "):
+                # Převedeme "do 3,25 m" na 3250
+                rozmer_txt = first_col.replace("do ", "").replace(" m", "").replace(",", ".")
+                try:
+                    sirka_mm = int(float(rozmer_txt) * 1000)
+                except:
+                    continue
+                
+                # Procházíme sloupce pro moduly (2, 3, 4, 5, 6, 7)
+                # Sloupce v CSV: 
+                # Modul 2: Cena=Col 1, Vyska=Col 2
+                # Modul 3: Cena=Col 3, Vyska=Col 4 ...
+                
+                for mod_i in range(2, 8): # Moduly 2 až 7
+                    col_idx_price = 1 + (mod_i - 2) * 2
+                    col_idx_height = col_idx_price + 1
+                    
+                    if col_idx_price < len(row):
+                        cena_raw = row[col_idx_price]
+                        vyska_raw = row[col_idx_height] if col_idx_height < len(row) else 0
+                        
+                        cena = parse_value_clean(cena_raw)
+                        vyska = parse_value_clean(vyska_raw) # Výška v CSV je v metrech (např 0,91)
+                        
+                        if cena > 0:
+                            item = Cenik(
+                                model=current_model,
+                                sirka_mm=sirka_mm,
+                                moduly=mod_i,
+                                cena=cena,
+                                vyska=vyska,
+                                delka_fix=0
+                            )
+                            session.add(item)
+
+        session.commit()
+        st.success("✅ Databáze úspěšně naplněna ceníky!")
+    except Exception as e:
+        session.rollback()
+        st.error(f"Chyba při plnění DB: {e}")
+    finally:
+        session.close()
+
+# Spustit seedování při startu
+if SessionLocal:
+    seed_database()
+
+
+# ########################################
+# 4. NOVÁ LOGIKA VÝPOČTŮ (Z DB)
+# ########################################
+
+def get_surcharge_db(search_term, is_rock=False):
+    if not SessionLocal: return 0
+    session = SessionLocal()
+    cat = "Rock" if is_rock else "Standard"
+    try:
+        # Hledáme položku, která obsahuje název
+        item = session.query(Priplatek).filter(
+            Priplatek.kategorie == cat,
+            Priplatek.nazev.ilike(f"%{search_term}%")
+        ).first()
+        
+        if not item and is_rock: # Fallback pokud není v Rock, zkus Standard
+             item = session.query(Priplatek).filter(
+                Priplatek.kategorie == "Standard",
+                Priplatek.nazev.ilike(f"%{search_term}%")
+            ).first()
+
+        if item:
+            if item.cena_pct > 0: return item.cena_pct
+            return item.cena_fix
+        return 0
+    finally:
+        session.close()
+
+def calculate_base_price_db(model, width_mm, modules):
+    if not SessionLocal: return 0,0,0, "DB Error"
+    session = SessionLocal()
+    try:
+        # Najít cenu pro model a počet modulů, kde šířka v DB >= požadovaná šířka
+        # Seřadíme podle šířky vzestupně a vezmeme první (nejbližší vyšší)
+        
+        # Ošetření: Pokud model nenajdeme, zkusíme PRACTIC
+        count = session.query(Cenik).filter(Cenik.model == model).count()
+        if count == 0: model = "PRACTIC"
+
+        row = session.query(Cenik).filter(
+            Cenik.model == model,
+            Cenik.moduly == modules,
+            Cenik.sirka_mm >= width_mm
+        ).order_by(Cenik.sirka_mm.asc()).first()
+
+        if row:
+            # Délka - zatím hardcode podle modulů, nebo bychom museli uložit délky taky
+            length = modules * 2150 
+            return row.cena, row.vyska * 1000, length, None
+        else:
+            return 0, 0, 0, "Rozměr mimo ceník (příliš široké)"
+    except Exception as e:
+        return 0,0,0, str(e)
+    finally:
+        session.close()
+
+# DB Funkce pro nabídky
+def save_offer_to_db(data_dict, total_price):
+    if not SessionLocal: return False, "Databáze není připojena."
+    session = SessionLocal()
+    try:
+        json_str = json.dumps(data_dict, default=str)
+        nova_nabidka = Nabidka(
+            zakaznik=data_dict.get('zak_jmeno', 'Neznámý'),
+            model=data_dict.get('model', '-'),
+            cena_celkem=total_price,
+            data_json=json_str,
+            datum_vytvoreni=datetime.now()
+        )
+        session.add(nova_nabidka)
+        session.commit()
+        return True, "Uloženo."
+    except Exception as e:
+        return False, str(e)
+    finally:
+        session.close()
+
+def get_all_offers():
+    if not SessionLocal: return []
+    session = SessionLocal()
+    try:
+        return session.query(Nabidka).order_by(Nabidka.datum_vytvoreni.desc()).all()
+    finally:
+        session.close()
+
+def delete_offer(offer_id):
+    if not SessionLocal: return
+    session = SessionLocal()
+    try:
+        offer = session.query(Nabidka).filter(Nabidka.id == offer_id).first()
+        if offer:
+            session.delete(offer)
+            session.commit()
+    finally:
+        session.close()
+
+# ########################################
+# 5. GEOMETRIE A PDF (BEZE ZMĚNY)
+# ########################################
 def calculate_geometry(width_mm, height_mm, length_mm):
     w, h, l = width_mm/1000.0, height_mm/1000.0, length_mm/1000.0
     a, b = w/2, h
@@ -216,49 +362,13 @@ def calculate_geometry(width_mm, height_mm, length_mm):
     face_area = (math.pi * a * b) / 2
     return roof_area, face_area
 
-def get_length_from_ceniky(df_c, modules):
-    try:
-        col_idx = 1 + (modules - 2) * 2
-        val = df_c.iloc[4, col_idx]
-        return parse_value(val)
-    except:
-        return modules * 2150
-
-def calculate_base_price(model, width, modules, df_c):
-    if df_c is None: return 0,0,0, "Chyba dat"
-    try:
-        mask = df_c[0].astype(str).str.lower() == model.lower()
-        if not mask.any(): 
-            mask = df_c[0].astype(str).str.lower() == "practic"
-        start_index = df_c.index[mask].tolist()[0]
-    except: return 0,0,0, "Model nenalezen"
-
-    offset = 1750 if model.upper() == "TERRACE" else 2750
-    row_shift = math.ceil((width - (offset + 250)) / 250) if width >= (offset + 250) else 0
-    target_row = start_index + 1 + row_shift
-    col_price = 1 + (modules - 2) * 2
-    col_height = col_price + 1
-
-    try:
-        price = parse_value(df_c.iloc[target_row, col_price])
-        height = parse_value(df_c.iloc[target_row, col_height]) * 1000
-        length = get_length_from_ceniky(df_c, modules)
-        if price == 0: return 0,0,0, "Cena 0 nebo mimo rozsah"
-        return price, height, length, None
-    except: return 0,0,0, "Mimo rozsah"
-
-# ########################################
-# 4. PDF GENERÁTOR
-# ########################################
 def img_to_base64(img_path):
     if not os.path.exists(img_path):
-        # Fallback case-insensitive
         dir_files = os.listdir('.')
         for f in dir_files:
             if f.lower() == img_path.lower():
                 img_path = f
                 break
-    
     if os.path.exists(img_path):
         with open(img_path, "rb") as img_file:
             return base64.b64encode(img_file.read()).decode('utf-8')
@@ -267,7 +377,6 @@ def img_to_base64(img_path):
 def generate_pdf_html(zak_udaje, items, totals):
     logo_b64 = img_to_base64("logo.png")
     mnich_b64 = img_to_base64("mnich.png")
-    
     html_template = """
     <!DOCTYPE html>
     <html lang="cs">
@@ -281,22 +390,18 @@ def generate_pdf_html(zak_udaje, items, totals):
             .mnich { max-width: 100px; height: auto; }
             .title { text-align: center; color: #004b96; font-size: 28px; font-weight: bold; margin-top: 10px; margin-bottom: 10px; }
             .divider { border-bottom: 3px solid #f07800; margin-bottom: 30px; }
-            
             .info-grid { display: flex; justify-content: space-between; margin-bottom: 30px; }
             .col { width: 48%; }
             .col-header { color: #004b96; font-weight: bold; font-size: 16px; margin-bottom: 5px; border-bottom: 1px solid #ddd; padding-bottom: 5px; }
             .info-text { margin: 2px 0; }
-            
             .items-table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
             .items-table th { background-color: #004b96; color: white; padding: 10px; text-align: left; }
             .items-table td { padding: 10px; border-bottom: 1px solid #eee; }
             .items-table tr:nth-child(even) { background-color: #f9f9f9; }
             .price-col { text-align: right; white-space: nowrap; }
-            
             .totals { float: right; width: 40%; text-align: right; }
             .total-row { display: flex; justify-content: space-between; margin: 5px 0; }
             .grand-total { font-size: 24px; color: #f07800; font-weight: bold; margin-top: 10px; border-top: 2px solid #f07800; padding-top: 5px; }
-            
             .footer { clear: both; margin-top: 50px; padding-top: 20px; border-top: 1px solid #004b96; font-size: 12px; color: #666; text-align: center; }
             .note { background-color: #e6f2ff; padding: 15px; border-left: 5px solid #004b96; margin-top: 20px; margin-bottom: 20px; font-style: italic; }
         </style>
@@ -306,10 +411,8 @@ def generate_pdf_html(zak_udaje, items, totals):
             <div>{% if logo_b64 %}<img src="data:image/png;base64,{{ logo_b64 }}" class="logo">{% else %}<h1>Rentmil s.r.o.</h1>{% endif %}</div>
             <div>{% if mnich_b64 %}<img src="data:image/png;base64,{{ mnich_b64 }}" class="mnich">{% endif %}</div>
         </div>
-        
         <div class="title">CENOVÁ NABÍDKA</div>
         <div class="divider"></div>
-        
         <div class="info-grid">
             <div class="col">
                 <div class="col-header">DODAVATEL</div>
@@ -333,7 +436,6 @@ def generate_pdf_html(zak_udaje, items, totals):
                 <div class="info-text">Platnost do: <strong>{{ data.platnost }}</strong></div>
             </div>
         </div>
-        
         <table class="items-table">
             <thead>
                 <tr>
@@ -352,7 +454,6 @@ def generate_pdf_html(zak_udaje, items, totals):
                 {% endfor %}
             </tbody>
         </table>
-        
         <div class="totals">
             <div class="total-row">
                 <span>Cena bez DPH:</span>
@@ -367,54 +468,39 @@ def generate_pdf_html(zak_udaje, items, totals):
                 <span>{{ "{:,.0f}".format(totals.s_dph).replace(',', ' ') }} Kč</span>
             </div>
         </div>
-        
         <div style="clear: both;"></div>
-
         <div class="note">
             <strong>Termín dodání:</strong> {{ data.termin }}<br>
             Poznámka: Tato nabídka je nezávazná. Pro potvrzení objednávky prosím kontaktujte svého obchodního zástupce.
         </div>
-        
         <div class="footer">
             Rentmil s.r.o. | www.rentmil.cz | bazeny@rentmil.cz
         </div>
     </body>
     </html>
     """
-    
     template = Template(html_template)
     html_content = template.render(data=zak_udaje, items=items, totals=totals, logo_b64=logo_b64, mnich_b64=mnich_b64)
-    
     with sync_playwright() as p:
         browser = p.chromium.launch()
         page = browser.new_page()
         page.set_content(html_content)
         pdf_bytes = page.pdf(format="A4", print_background=True, margin={"top": "0cm", "right": "0cm", "bottom": "0cm", "left": "0cm"})
         browser.close()
-        
     return pdf_bytes
 
 # ########################################
-# 5. UŽIVATELSKÉ ROZHRANÍ (STREAMLIT)
+# 6. UI (STREAMLIT)
 # ########################################
 st.sidebar.title("Navigace")
 page_mode = st.sidebar.radio("Režim:", ["Kalkulátor", "Historie Nabídek"])
 
-df_c, df_p = load_data()
-
-# ----------------------------
-# REŽIM: HISTORIE
-# ----------------------------
 if page_mode == "Historie Nabídek":
     st.title("🗄️ Historie Nabídek")
-    
-    # Získat data z DB
     nabidky = get_all_offers()
-    
     if not nabidky:
         st.info("Zatím žádné uložené nabídky.")
     else:
-        # Zobrazení tabulky
         data_table = []
         for n in nabidky:
             data_table.append({
@@ -424,65 +510,48 @@ if page_mode == "Historie Nabídek":
                 "Model": n.model,
                 "Cena": f"{n.cena_celkem:,.0f} Kč"
             })
-        
         st.dataframe(pd.DataFrame(data_table), use_container_width=True, hide_index=True)
-        
         st.divider()
         st.subheader("Akce s nabídkou")
-        
         col_hist1, col_hist2 = st.columns(2)
         with col_hist1:
-            selected_id = st.selectbox("Vyber ID nabídky k načtení/smazání:", [n.id for n in nabidky])
-        
+            selected_id = st.selectbox("Vyber ID nabídky:", [n.id for n in nabidky])
         with col_hist2:
-            st.write("") # Spacer
+            st.write("") 
             st.write("") 
             col_btn1, col_btn2 = st.columns(2)
             with col_btn1:
                 if st.button("📂 Načíst do kalkulátoru"):
-                    # Načtení dat
                     offer_to_load = next((n for n in nabidky if n.id == selected_id), None)
                     if offer_to_load:
-                        saved_data = json.loads(offer_to_load.data_json)
-                        # Aktualizace session state
-                        st.session_state['form_data'] = saved_data
-                        st.success(f"Nabídka ID {selected_id} načtena! Přepni se zpět na Kalkulátor.")
-            
+                        st.session_state['form_data'] = json.loads(offer_to_load.data_json)
+                        st.success(f"Načteno ID {selected_id}. Přepni se na Kalkulátor.")
             with col_btn2:
                 if st.button("🗑️ Smazat"):
                     delete_offer(selected_id)
                     st.rerun()
 
-# ----------------------------
-# REŽIM: KALKULÁTOR
-# ----------------------------
 else:
+    # REŽIM KALKULÁTOR
     st.title("🛠 Konfigurátor Zastřešení")
-    
-    # Funkce pro bezpečné získání hodnoty ze session state (pro načítání)
     def get_val(key, default):
         if 'form_data' in st.session_state and key in st.session_state['form_data']:
             return st.session_state['form_data'][key]
         return default
 
-    # --- ZÁKAZNÍK ---
+    # --- INPUTY ---
     with st.expander("👤 Údaje o zákazníkovi a nabídce", expanded=True):
         col_cust1, col_cust2 = st.columns(2)
         with col_cust1:
-            st.subheader("Zákazník")
             zak_jmeno = st.text_input("Jméno a příjmení", value=get_val('zak_jmeno', ""))
             zak_adresa = st.text_input("Adresa", value=get_val('zak_adresa', ""))
             zak_tel = st.text_input("Telefon", value=get_val('zak_tel', ""))
             zak_email = st.text_input("Email", value=get_val('zak_email', ""))
         with col_cust2:
-            st.subheader("Nabídka")
             def_vypracoval = get_val('vypracoval', "Martin Zikula")
-            # Ošetření, aby hodnota byla v seznamu
             list_vypracoval = ["Martin Zikula", "Zuzana Zikulová", "Drahoslav Houška", "Ivan Reif", "Lenka Finklarová"]
             if def_vypracoval not in list_vypracoval: list_vypracoval.append(def_vypracoval)
-            
             vypracoval = st.selectbox("Vypracoval:", list_vypracoval, index=list_vypracoval.index(def_vypracoval))
-            
             col_d1, col_d2 = st.columns(2)
             with col_d1: platnost_dny = st.number_input("Platnost (dní)", value=get_val('platnost_dny', 10), min_value=1)
             with col_d2: 
@@ -491,26 +560,20 @@ else:
                 st.date_input("Platnost do:", value=platnost_do, disabled=True)
             termin_dodani = st.text_input("Termín dodání", value=get_val('termin_dodani', "dle dohody (cca 6-8 týdnů)"))
 
-    # --- SIDEBAR (PARAMETRY) ---
     with st.sidebar:
         st.header("1. Parametry")
-        
         def_model = get_val('model', "PRACTIC")
-        model = st.selectbox("Model", ["PRACTIC", "HARMONY", "DREAM", "HORIZONT", "STAR", "ROCK", "TERRACE"], index=["PRACTIC", "HARMONY", "DREAM", "HORIZONT", "STAR", "ROCK", "TERRACE"].index(def_model) if def_model in ["PRACTIC", "HARMONY", "DREAM", "HORIZONT", "STAR", "ROCK", "TERRACE"] else 0)
+        models_list = ["PRACTIC", "HARMONY", "DREAM", "HORIZONT", "STAR", "ROCK", "TERRACE"]
+        model = st.selectbox("Model", models_list, index=models_list.index(def_model) if def_model in models_list else 0)
         is_rock = (model.upper() == "ROCK")
-        
         sirka = st.number_input("Šířka (mm)", 2000, 8000, get_val('sirka', 3500), step=10)
         moduly = st.slider("Počet modulů", 2, 7, get_val('moduly', 3))
 
         st.markdown("---")
         st.header("2. Barvy a Polykarbonát")
-        
         barvy_opts = ["Stříbrný Elox (Bonus -10 000 Kč)", "Bronzový Elox", "Antracitový Elox", "RAL Nástřik"]
         def_barva = get_val('barva_typ', barvy_opts[0])
-        if def_barva not in barvy_opts: barvy_opts.append(def_barva)
-        
-        barva_typ = st.selectbox("Barva konstrukce", barvy_opts, index=barvy_opts.index(def_barva))
-        
+        barva_typ = st.selectbox("Barva konstrukce", barvy_opts, index=barvy_opts.index(def_barva) if def_barva in barvy_opts else 0)
         poly_strecha = st.checkbox("Plný polykarbonát - STŘECHA", value=get_val('poly_strecha', False))
         poly_cela = st.checkbox("Plný polykarbonát - ČELA", value=get_val('poly_cela', False))
         change_color_poly = st.checkbox("Změna barvy polykarbonátu", value=get_val('change_color_poly', False))
@@ -536,56 +599,61 @@ else:
         km = st.number_input("Doprava (km)", 0, 5000, get_val('km', 0))
         montaz = st.checkbox("Montáž", value=get_val('montaz', True))
         sleva_pct = st.number_input("Sleva (%)", 0, 100, get_val('sleva_pct', 0))
-        
-        dph_opts = [21, 12, 0]
-        def_dph = get_val('dph_sazba', 21)
-        dph_sazba = st.selectbox("DPH", dph_opts, index=dph_opts.index(def_dph) if def_dph in dph_opts else 0)
+        dph_sazba = st.selectbox("DPH", [21, 12, 0], index=0)
 
-    # --- VÝPOČET ---
-    base_price, height, length, err = calculate_base_price(model, sirka, moduly, df_c)
+    # --- VÝPOČET POMOCÍ DATABÁZE ---
+    base_price, height, length, err = calculate_base_price_db(model, sirka, moduly)
 
     if err:
-        st.error(f"⚠️ Nelze vypočítat: {err}")
+        st.error(f"⚠️ {err}")
     else:
         items = []
         items.append({"pol": f"Zastřešení {model}", "det": f"{moduly} seg., Š: {sirka}mm", "cen": base_price})
         running = base_price
 
-        # Výpočty
+        # Zkrácení
         if zkraceni_ks > 0:
-            val = get_surcharge(df_p, "Zkrácení modulu", is_rock) or 1500
+            val = get_surcharge_db("Zkrácení modulu", is_rock) or 1500
             cost = zkraceni_ks * val
             items.append({"pol": "Zkrácení modulů", "det": f"{zkraceni_ks} ks x {val} Kč", "cen": cost})
             running += cost
+
+        # Prodloužení
         if prodlouzeni_ks > 0 and prodlouzeni_mm > 0:
-            fix = get_surcharge(df_p, "Prodloužení modulu", is_rock) or 3000
-            per_m = get_surcharge(df_p, "za metr", is_rock) or 2000
+            fix = get_surcharge_db("Prodloužení modulu", is_rock) or 3000
+            per_m = get_surcharge_db("za metr", is_rock) or 2000
+            # Pokud nám DB vrátí 0 (nenalezeno), použijeme fallback
+            if fix == 0: fix = 3000
+            if per_m == 0: per_m = 2000
+            
             c = prodlouzeni_ks * (fix + (prodlouzeni_mm/1000.0 * per_m))
             items.append({"pol": "Prodloužení modulů", "det": f"{prodlouzeni_ks} ks á {prodlouzeni_mm}mm", "cen": c})
             running += c
 
+        # Barvy
         if "Stříbrný" in barva_typ:
             val = base_price * -0.10
             items.append({"pol": "BONUS: Stříbrný Elox", "det": "Sleva 10% ze základu", "cen": val})
             running += val
         elif "RAL" in barva_typ:
-            val = get_surcharge(df_p, "RAL", is_rock) or 0.20
+            val = get_surcharge_db("RAL", is_rock) or 0.20
             c = base_price * val
             items.append({"pol": "Příplatek RAL", "det": f"{val*100:.0f}%", "cen": c})
             running += c
         elif "Bronz" in barva_typ:
-            val = get_surcharge(df_p, "BR elox", is_rock) or 0.05
+            val = get_surcharge_db("BR elox", is_rock) or 0.05
             c = base_price * val
             items.append({"pol": "Příplatek Bronz", "det": f"{val*100:.0f}%", "cen": c})
             running += c
         elif "Antracit" in barva_typ:
-            val = get_surcharge(df_p, "antracit elox", is_rock) or 0.05
+            val = get_surcharge_db("antracit elox", is_rock) or 0.05
             c = base_price * val
             items.append({"pol": "Příplatek Antracit", "det": f"{val*100:.0f}%", "cen": c})
             running += c
 
+        # Polykarbonát
         roof_a, face_a = calculate_geometry(sirka, height, length)
-        poly_p = get_surcharge(df_p, "Plný polykarbonát", is_rock) or 1000
+        poly_p = get_surcharge_db("Plný polykarbonát", is_rock) or 1000
         if poly_strecha:
             c = roof_a * poly_p
             items.append({"pol": "Plný poly (Střecha)", "det": f"{roof_a:.1f} m²", "cen": c})
@@ -595,23 +663,23 @@ else:
             items.append({"pol": "Plný poly (Čela)", "det": f"{face_a*2:.1f} m²", "cen": c})
             running += c
         if change_color_poly:
-            val = get_surcharge(df_p, "barvy poly", is_rock) or 0.07
+            val = get_surcharge_db("barvy poly", is_rock) or 0.07
             c = base_price * val
             items.append({"pol": "Změna barvy poly", "det": f"{val*100:.0f}%", "cen": c})
             running += c
 
         if podhori:
-            val = get_surcharge(df_p, "podhorskou", is_rock) or 0.15
+            val = get_surcharge_db("podhorskou", is_rock) or 0.15
             c = base_price * val
             items.append({"pol": "Zpevnění Podhoří", "det": f"{val*100:.0f}%", "cen": c})
             running += c
 
+        # Dveře
         doors = []
-        p_vc = get_surcharge(df_p, "Jednokřídlé dveře", is_rock) or 5000
-        p_bok = get_surcharge(df_p, "boční vstup", is_rock) or 7000
+        p_vc = get_surcharge_db("Jednokřídlé dveře", is_rock) or 5000
+        p_bok = get_surcharge_db("boční vstup", is_rock) or 7000
         for _ in range(pocet_dvere_vc): doors.append(("Dveře v čele", p_vc))
         for _ in range(pocet_dvere_bok): doors.append(("Boční vstup", p_bok))
-        
         if doors:
             doors.sort(key=lambda x: x[1], reverse=True)
             free = doors.pop(0)
@@ -619,43 +687,46 @@ else:
             for n, p in doors:
                 items.append({"pol": n, "det": "Další kus", "cen": p})
                 running += p
-                
+
         if zamykaci_klika and (pocet_dvere_vc + pocet_dvere_bok) > 0:
             cnt = pocet_dvere_vc + pocet_dvere_bok
-            val = get_surcharge(df_p, "Uzamykání dveří", is_rock) or 800
+            val = get_surcharge_db("Uzamykání dveří", is_rock) or 800
             c = cnt * val
             items.append({"pol": "Zamykací klika", "det": f"{cnt} ks", "cen": c})
             running += c
-            
+
         if klapka:
-            val = get_surcharge(df_p, "klapka", is_rock) or 7000
+            val = get_surcharge_db("klapka", is_rock) or 7000
             items.append({"pol": "Větrací klapka", "det": "", "cen": val})
             running += val
 
         if pochozi_koleje:
             m_rail = (length / 1000.0) * 2
-            val = get_surcharge(df_p, "Pochozí kolejnice", is_rock) or 330
+            val = get_surcharge_db("Pochozí kolejnice", is_rock) or 330
             c = m_rail * val
             items.append({"pol": "Pochozí koleje", "det": f"{m_rail:.1f} m", "cen": c})
             running += c
+
         if ext_draha_m > 0:
             m_rail_ext = ext_draha_m * 2
-            val = get_surcharge(df_p, "Jeden metr koleje", is_rock) or 220
+            val = get_surcharge_db("Jeden metr koleje", is_rock) or 220
             c = m_rail_ext * val
             items.append({"pol": "Prodloužení dráhy", "det": f"+{ext_draha_m} m", "cen": c})
             running += c
 
         c_montaz = 0
         if montaz:
-            val = get_surcharge(df_p, "Montáž zastřešení v ČR", is_rock) or 0.08
+            val = get_surcharge_db("Montáž zastřešení v ČR", is_rock) or 0.08
             c_montaz = running * val
             items.append({"pol": "Montáž (ČR)", "det": f"{val*100:.0f}% z materiálu", "cen": c_montaz})
+        
         subtotal = running + c_montaz
         
         c_doprava = 0
         if km > 0:
             c_doprava = km * 18
             items.append({"pol": "Doprava", "det": f"{km} km", "cen": c_doprava})
+        
         total_no_vat = subtotal + c_doprava
         
         if sleva_pct > 0:
@@ -666,24 +737,19 @@ else:
         dph_val = total_no_vat * (dph_sazba / 100.0)
         total_with_vat = total_no_vat + dph_val
 
-        # --- ZOBRAZENÍ VÝSTUPU ---
+        # --- ZOBRAZENÍ ---
         st.divider()
         col1, col2 = st.columns([1.5, 1])
         with col1:
             st.subheader("Rozpočet")
-            df_show = pd.DataFrame(items)
-            if not df_show.empty:
-                st.dataframe(df_show, hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(items), hide_index=True, use_container_width=True)
         with col2:
             st.subheader("Celkem")
             st.metric("Bez DPH", f"{total_no_vat:,.0f} Kč")
             st.metric(f"S DPH ({dph_sazba}%)", f"{total_with_vat:,.0f} Kč")
             
-            # AKČNÍ TLAČÍTKA
-            col_act1, col_act2 = st.columns(2)
-            
-            # 1. PDF
-            with col_act1:
+            c_a1, c_a2 = st.columns(2)
+            with c_a1:
                 if zak_jmeno:
                     zak_udaje = {
                         'jmeno': zak_jmeno, 'adresa': zak_adresa, 'tel': zak_tel, 'email': zak_email,
@@ -691,19 +757,11 @@ else:
                         'platnost': platnost_do.strftime("%d.%m.%Y"), 'termin': termin_dodani
                     }
                     totals = {'bez_dph': total_no_vat, 'dph': dph_val, 's_dph': total_with_vat, 'sazba_dph': dph_sazba}
-                    try:
-                        pdf_data = generate_pdf_html(zak_udaje, items, totals)
-                        st.download_button("📄 PDF Nabídka", data=pdf_data, file_name=f"Nabidka_{zak_jmeno.replace(' ','_')}.pdf", mime="application/pdf", type="primary")
-                    except Exception as e:
-                        st.error(f"Chyba PDF: {e}")
-                else:
-                    st.info("Vyplň jméno pro PDF.")
-            
-            # 2. ULOŽIT DO DB
-            with col_act2:
+                    pdf_data = generate_pdf_html(zak_udaje, items, totals)
+                    st.download_button("📄 PDF Nabídka", data=pdf_data, file_name=f"Nabidka_{zak_jmeno}.pdf", mime="application/pdf", type="primary")
+            with c_a2:
                 if zak_jmeno:
                     if st.button("💾 Uložit do systému"):
-                        # Sbírání dat pro uložení
                         save_data = {
                             'zak_jmeno': zak_jmeno, 'zak_adresa': zak_adresa, 'zak_tel': zak_tel, 'zak_email': zak_email,
                             'vypracoval': vypracoval, 'platnost_dny': platnost_dny, 'termin_dodani': termin_dodani,
@@ -716,7 +774,5 @@ else:
                             'dph_sazba': dph_sazba
                         }
                         success, msg = save_offer_to_db(save_data, total_with_vat)
-                        if success:
-                            st.success(f"Nabídka pro {zak_jmeno} uložena!")
-                        else:
-                            st.error(f"Chyba: {msg}")
+                        if success: st.success("Uloženo!")
+                        else: st.error(msg)
