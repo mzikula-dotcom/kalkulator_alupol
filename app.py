@@ -13,8 +13,6 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy import func
 
 # --- KONSTANTY A TABULKY ---
-# Tabulka standardních délek dle 'výpočty.xlsx'
-# Počet modulů -> Délka v mm
 STD_LENGTHS = {
     2: 4336,
     3: 6446,
@@ -24,7 +22,7 @@ STD_LENGTHS = {
     7: 14886
 }
 
-# Geometrické konstanty pro PRACTIC (dle 'výpočty.xlsx')
+# Geometrické konstanty pro PRACTIC
 STEP_WIDTH = 100  # Rozdíl šířky mezi moduly (mm)
 STEP_HEIGHT = 50  # Rozdíl výšky mezi moduly (mm)
 
@@ -102,10 +100,10 @@ def parse_value_clean(val):
 # ########################################
 def geometry_segment_area(width_mm, height_mm):
     """
-    Vypočítá plochu kruhové úseče (čela) podle vzorců z VBA.
-    Vrací plochu v m2 a délku oblouku v m.
+    Vypočítá plochu kruhové úseče (čela) a délku oblouku.
     """
-    if width_mm <= 0 or height_mm <= 0: return 0, 0
+    if width_mm <= 0: return 0, 0
+    if height_mm <= 0: height_mm = 1 # Ochrana dělení nulou
     
     s = width_mm
     v = height_mm
@@ -115,57 +113,53 @@ def geometry_segment_area(width_mm, height_mm):
         R = ((s**2 / 4) + v**2) / (2 * v)
         if R <= 0: return 0, 0
         
-        # Úhel alfa (ve stupních): alpha = 2 * arcsin(s / (2*R))
-        # Python math.asin vrací radiány
-        val = s / (2 * R)
-        if val > 1: val = 1 # Ochrana proti float chybě
-        alpha_rad = 2 * math.asin(val)
+        # Úhel alfa (rad) = 2 * arcsin(s / (2*R))
+        ratio = s / (2 * R)
+        if ratio > 1: ratio = 1
+        if ratio < -1: ratio = -1
+        alpha_rad = 2 * math.asin(ratio)
         
-        # Délka oblouku: L = alpha_rad * R
+        # Délka oblouku L = alpha * R
         arc_len = alpha_rad * R
         
-        # Plocha kruhové úseče (Segment): 1/2 * R^2 * (alpha_rad - sin(alpha_rad))
+        # Plocha úseče = 0.5 * R^2 * (alpha - sin(alpha))
         area = 0.5 * (R**2) * (alpha_rad - math.sin(alpha_rad))
         
-        return area / 1_000_000, arc_len / 1000 # převod na m2 a m
+        return area / 1_000_000, arc_len / 1000 # m2, m
     except:
         return 0, 0
 
 def calculate_complex_geometry(model, width_mm, height_mm, modules, total_length_mm):
     """
     Počítá plochy pro Practic (teleskopický).
-    Iteruje přes moduly, zmenšuje šířku a výšku.
     """
-    # 1. Velké čelo (První modul - největší)
-    # Používáme zadanou šířku a výšku
+    # 1. Velké čelo (První modul)
     area_face_large, arc_large = geometry_segment_area(width_mm, height_mm)
     
-    # 2. Malé čelo (Poslední modul - nejmenší)
-    # Rozměry se zmenšují o STEP_WIDTH a STEP_HEIGHT pro každý modul
-    # Modul 1 (idx 0): W, H
-    # Modul N (idx N-1): W - (N-1)*StepW, H - (N-1)*StepH
+    # 2. Malé čelo (Poslední modul)
     w_small = width_mm - ((modules - 1) * STEP_WIDTH)
     h_small = height_mm - ((modules - 1) * STEP_HEIGHT)
+    if h_small < 0: h_small = 0 # Ochrana
     
     area_face_small, arc_small = geometry_segment_area(w_small, h_small)
     
-    # 3. Plocha střechy (Součet plášťů všech modulů)
-    # Délka jednoho modulu
+    # 3. Plocha střechy
     mod_len_avg = total_length_mm / modules
-    
     total_roof_area = 0
+    
     for i in range(modules):
         w_i = width_mm - (i * STEP_WIDTH)
         h_i = height_mm - (i * STEP_HEIGHT)
+        if h_i < 0: h_i = 0
         _, arc_i = geometry_segment_area(w_i, h_i)
         
-        # Plocha pláště modulu = délka oblouku * délka modulu
+        # Plocha pláště = délka oblouku * délka modulu
         total_roof_area += (arc_i * (mod_len_avg / 1000.0))
         
     return total_roof_area, area_face_large, area_face_small
 
 # ########################################
-# 4. LOGIKA CENA A DB
+# 4. DB FUNKCE
 # ########################################
 
 def get_surcharge_db(search_term, is_rock=False):
@@ -177,9 +171,9 @@ def get_surcharge_db(search_term, is_rock=False):
         if not item and is_rock: 
              item = session.query(Priplatek).filter(Priplatek.kategorie == "Standard", Priplatek.nazev.ilike(f"%{search_term}%")).first()
         if item:
-            if item.cena_pct > 0: return item.cena_pct
-            return item.cena_fix
-        return 0
+            # Vrátíme dict s oběma hodnotami, abychom věděli co je co
+            return {"fix": item.cena_fix, "pct": item.cena_pct}
+        return {"fix": 0, "pct": 0}
     finally:
         session.close()
 
@@ -534,12 +528,10 @@ else:
         sirka = st.number_input("Šířka (mm)", 2000, 8000, get_val('sirka', 3500), step=10)
         moduly = st.slider("Počet modulů", 2, 7, get_val('moduly', 3))
         
-        # --- NOVÁ LOGIKA DÉLKY Z TABULKY ---
-        std_len = STD_LENGTHS.get(moduly, moduly * 2190) # Fallback pokud klíč nenajde
-        
+        # --- DÉLKA Z TABULKY ---
+        std_len = STD_LENGTHS.get(moduly, moduly * 2190)
         st.caption(f"Standardní délka pro {moduly} moduly: {std_len} mm")
-        celkova_delka = st.number_input("Celková délka (mm)", 2000, 20000, get_val('celkova_delka', std_len), step=10, help="Zadej skutečnou délku. Program sám dopočítá příplatky za prodloužení/zkrácení.")
-        
+        celkova_delka = st.number_input("Celková délka (mm)", 2000, 20000, get_val('celkova_delka', std_len), step=10)
         diff_len = celkova_delka - std_len
 
         st.markdown("---")
@@ -570,7 +562,12 @@ else:
 
         st.markdown("---")
         st.header("4. Ostatní")
-        km = st.number_input("Doprava (km)", 0, 5000, get_val('km', 0))
+        col_km1, col_km2 = st.columns(2)
+        with col_km1:
+            km = st.number_input("Doprava (km)", 0, 5000, get_val('km', 0))
+        with col_km2:
+            cena_za_km = st.number_input("Cena za km", 0, 100, get_val('cena_za_km', 18))
+            
         montaz = st.checkbox("Montáž", value=get_val('montaz', True))
         sleva_pct = st.number_input("Sleva (%)", 0, 100, get_val('sleva_pct', 0))
         dph_sazba = st.selectbox("DPH", [21, 12, 0], index=0)
@@ -584,77 +581,78 @@ else:
         items = []
         avg_mod_len = int(celkova_delka / moduly)
         items.append({"pol": f"Zastřešení {model}", "det": f"{moduly} seg., Š: {sirka}mm ({avg_mod_len} mm/mod)", "cen": base_price})
-        running = base_price
-
-        # --- LOGIKA PRODLOUŽENÍ / ZKRÁCENÍ (AUTOMATICKY) ---
+        
+        # PRODLOUŽENÍ / ZKRÁCENÍ
         if diff_len > 10:
-            fix_prod = get_surcharge_db("Prodloužení modulu", is_rock) or 3000
-            per_m = get_surcharge_db("za metr", is_rock) or 2000
+            p_data = get_surcharge_db("Prodloužení modulu", is_rock)
+            p_meter_data = get_surcharge_db("za metr", is_rock)
+            
+            # Bezpečné získání cen
+            fix_prod = p_data['fix'] if p_data['fix'] > 0 else 3000
+            per_m = p_meter_data['fix'] if p_meter_data['fix'] > 0 else 2000
+            
             price_len = (diff_len / 1000.0) * per_m
             cost = fix_prod + price_len
             items.append({"pol": "Atypická délka (Prodloužení)", "det": f"+{diff_len} mm", "cen": cost})
-            running += cost
 
         elif diff_len < -10:
-            val = get_surcharge_db("Zkrácení modulu", is_rock) or 1500
+            p_data = get_surcharge_db("Zkrácení modulu", is_rock)
+            val = p_data['fix'] if p_data['fix'] > 0 else 1500
             items.append({"pol": "Atypická délka (Zkrácení)", "det": f"{diff_len} mm", "cen": val})
-            running += val
 
         # Barvy
         if "Stříbrný" in barva_typ:
             val = base_price * -0.10
             items.append({"pol": "BONUS: Stříbrný Elox", "det": "Sleva 10% ze základu", "cen": val})
-            running += val
         elif "RAL" in barva_typ:
-            val = get_surcharge_db("RAL", is_rock) or 0.20
+            p_data = get_surcharge_db("RAL", is_rock)
+            val = p_data['pct'] if p_data['pct'] > 0 else 0.20
             c = base_price * val
             items.append({"pol": "Příplatek RAL", "det": f"{val*100:.0f}%", "cen": c})
-            running += c
         elif "Bronz" in barva_typ:
-            val = get_surcharge_db("BR elox", is_rock) or 0.05
+            p_data = get_surcharge_db("BR elox", is_rock)
+            val = p_data['pct'] if p_data['pct'] > 0 else 0.05
             c = base_price * val
             items.append({"pol": "Příplatek Bronz", "det": f"{val*100:.0f}%", "cen": c})
-            running += c
         elif "Antracit" in barva_typ:
-            val = get_surcharge_db("antracit elox", is_rock) or 0.05
+            p_data = get_surcharge_db("antracit elox", is_rock)
+            val = p_data['pct'] if p_data['pct'] > 0 else 0.05
             c = base_price * val
             items.append({"pol": "Příplatek Antracit", "det": f"{val*100:.0f}%", "cen": c})
-            running += c
 
-        # --- GEOMETRIE A POLYKARBONÁT ---
+        # GEOMETRIE A POLY
         roof_a, face_a_large, face_a_small = calculate_complex_geometry(model, sirka, height, moduly, celkova_delka)
-        poly_p = get_surcharge_db("Plný polykarbonát", is_rock) or 1000
+        p_data = get_surcharge_db("Plný polykarbonát", is_rock)
+        
+        # ZDE JE KONTROLA: Polykarbonát musí mít fixní cenu. Pokud je 0, dáme fallback 1000.
+        poly_p = p_data['fix']
+        if poly_p < 10: poly_p = 1000
         
         if poly_strecha:
             c = roof_a * poly_p
             items.append({"pol": "Plný poly (Střecha)", "det": f"{roof_a:.1f} m²", "cen": c})
-            running += c
-            
         if poly_celo_male:
             c = face_a_small * poly_p
             items.append({"pol": "Plný poly (Malé čelo)", "det": f"{face_a_small:.1f} m²", "cen": c})
-            running += c
-            
         if poly_celo_velke:
             c = face_a_large * poly_p
             items.append({"pol": "Plný poly (Velké čelo)", "det": f"{face_a_large:.1f} m²", "cen": c})
-            running += c
 
         if change_color_poly:
-            val = get_surcharge_db("barvy poly", is_rock) or 0.07
+            p_data = get_surcharge_db("barvy poly", is_rock)
+            val = p_data['pct'] if p_data['pct'] > 0 else 0.07
             c = base_price * val
             items.append({"pol": "Změna barvy poly", "det": f"{val*100:.0f}%", "cen": c})
-            running += c
 
         if podhori:
-            val = get_surcharge_db("podhorskou", is_rock) or 0.15
+            p_data = get_surcharge_db("podhorskou", is_rock)
+            val = p_data['pct'] if p_data['pct'] > 0 else 0.15
             c = base_price * val
             items.append({"pol": "Zpevnění Podhoří", "det": f"{val*100:.0f}%", "cen": c})
-            running += c
 
         doors = []
-        p_vc = get_surcharge_db("Jednokřídlé dveře", is_rock) or 5000
-        p_bok = get_surcharge_db("boční vstup", is_rock) or 7000
+        p_vc = get_surcharge_db("Jednokřídlé dveře", is_rock)['fix'] or 5000
+        p_bok = get_surcharge_db("boční vstup", is_rock)['fix'] or 7000
         for _ in range(pocet_dvere_vc): doors.append(("Dveře v čele", p_vc))
         for _ in range(pocet_dvere_bok): doors.append(("Boční vstup", p_bok))
         if doors:
@@ -663,59 +661,60 @@ else:
             items.append({"pol": f"{free[0]} (1. ks)", "det": "ZDARMA", "cen": 0})
             for n, p in doors:
                 items.append({"pol": n, "det": "Další kus", "cen": p})
-                running += p
 
         if zamykaci_klika and (pocet_dvere_vc + pocet_dvere_bok) > 0:
             cnt = pocet_dvere_vc + pocet_dvere_bok
-            val = get_surcharge_db("Uzamykání dveří", is_rock) or 800
+            val = get_surcharge_db("Uzamykání dveří", is_rock)['fix'] or 800
             c = cnt * val
             items.append({"pol": "Zamykací klika", "det": f"{cnt} ks", "cen": c})
-            running += c
 
         if klapka:
-            val = get_surcharge_db("klapka", is_rock) or 7000
+            val = get_surcharge_db("klapka", is_rock)['fix'] or 7000
             items.append({"pol": "Větrací klapka", "det": "", "cen": val})
-            running += val
 
         if pochozi_koleje:
             m_rail = (celkova_delka / 1000.0) * 2
             if pochozi_koleje_zdarma:
                 items.append({"pol": "Pochozí koleje", "det": f"{m_rail:.1f} m (AKCE)", "cen": 0})
             else:
-                val = get_surcharge_db("Pochozí kolejnice", is_rock) or 330
+                val = get_surcharge_db("Pochozí kolejnice", is_rock)['fix'] or 330
                 c = m_rail * val
                 items.append({"pol": "Pochozí koleje", "det": f"{m_rail:.1f} m", "cen": c})
-                running += c
 
         if ext_draha_m > 0:
-            val = get_surcharge_db("Jeden metr koleje", is_rock) or 220
+            val = get_surcharge_db("Jeden metr koleje", is_rock)['fix'] or 220
             c = ext_draha_m * val
             items.append({"pol": "Prodloužení dráhy", "det": f"+{ext_draha_m} m", "cen": c})
-            running += c
 
+        # MONTÁŽ
+        # Spočítáme mezisoučet jen pro montáž
+        mat_sum = sum(x['cen'] for x in items)
+        
         c_montaz = 0
         if montaz:
-            val = get_surcharge_db("Montáž zastřešení v ČR", is_rock) or 0.08
-            c_montaz = running * val
+            p_data = get_surcharge_db("Montáž zastřešení v ČR", is_rock)
+            val = p_data['pct'] if p_data['pct'] > 0 else 0.08
+            c_montaz = mat_sum * val
             items.append({"pol": "Montáž (ČR)", "det": f"{val*100:.0f}% z materiálu", "cen": c_montaz})
         
-        subtotal = running + c_montaz
+        # SOUČET PRO SLEVU (Materiál + Montáž)
+        # Tady sčítáme vše co je doteď v items
+        sum_before_discount = sum(x['cen'] for x in items)
         
-        # --- NOVÁ LOGIKA SLEVY (Bez dopravy) ---
-        total_before_discount = subtotal
         discount_val = 0
         if sleva_pct > 0:
-            discount_val = total_before_discount * (sleva_pct / 100.0)
-            items.append({"pol": "SLEVA", "det": f"-{sleva_pct}% (z materiálu a mtž)", "cen": -discount_val})
+            discount_val = sum_before_discount * (sleva_pct / 100.0)
+            items.append({"pol": "SLEVA", "det": f"-{sleva_pct}% (bez dopravy)", "cen": -discount_val})
         
-        total_after_discount = total_before_discount - discount_val
-        
-        c_doprava = 0 if km == 0 else km * 18
+        # DOPRAVA (Až po slevě)
+        c_doprava = 0 if km == 0 else km * cena_za_km
         if km > 0:
-            items.append({"pol": "Doprava", "det": f"{km} km", "cen": c_doprava})
-        
-        total_no_vat = total_after_discount + c_doprava
+            items.append({"pol": "Doprava", "det": f"{km} km x {cena_za_km} Kč", "cen": c_doprava})
 
+        # FINÁLNÍ SOUČET Z POLOŽEK
+        # Toto je ta klíčová změna - sčítáme finální items
+        total_no_vat = sum(item['cen'] for item in items)
+        
         dph_val = total_no_vat * (dph_sazba / 100.0)
         total_with_vat = total_no_vat + dph_val
 
@@ -724,6 +723,8 @@ else:
         with col1:
             st.subheader("Rozpočet")
             st.dataframe(pd.DataFrame(items), hide_index=True, use_container_width=True)
+            # Debug poly plochy
+            st.caption(f"DEBUG: Střecha {roof_a:.2f}m2, Velké čelo {face_a_large:.2f}m2, Malé čelo {face_a_small:.2f}m2")
         with col2:
             st.subheader("Celkem")
             st.metric("Bez DPH", f"{total_no_vat:,.0f} Kč")
@@ -749,7 +750,8 @@ else:
                             'pocet_dvere_vc': pocet_dvere_vc, 'pocet_dvere_bok': pocet_dvere_bok,
                             'zamykaci_klika': zamykaci_klika, 'klapka': klapka, 
                             'pochozi_koleje': pochozi_koleje, 'pochozi_koleje_zdarma': pochozi_koleje_zdarma,
-                            'ext_draha_m': ext_draha_m, 'podhori': podhori, 'km': km, 'montaz': montaz, 'sleva_pct': sleva_pct,
+                            'ext_draha_m': ext_draha_m, 'podhori': podhori, 'km': km, 'cena_za_km': cena_za_km, 
+                            'montaz': montaz, 'sleva_pct': sleva_pct,
                             'dph_sazba': dph_sazba
                         }
                         success, msg = save_offer_to_db(save_data, total_with_vat)
