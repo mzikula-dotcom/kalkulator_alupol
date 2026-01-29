@@ -13,16 +13,14 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy import func
 
 # --- DEFINICE MODELŮ (Dle výpočty.xlsx) ---
-# step_width: o kolik je další modul širší (mm)
-# step_height: o kolik je další modul vyšší (mm)
 MODEL_PARAMS = {
     "PRACTIC": {"step_w": 100, "step_h": 50},
     "DREAM":   {"step_w": 130, "step_h": 65},
     "HARMONY": {"step_w": 130, "step_h": 65},
     "ROCK":    {"step_w": 130, "step_h": 65},
-    "TERRACE": {"step_w": 71,  "step_h": 65}, # 70.6 zaokrouhleno
-    "HORIZONT":{"step_w": 130, "step_h": 65}, # Odhad (nenalezeno v xls), fallback na standard
-    "STAR":    {"step_w": 130, "step_h": 65}, # Odhad
+    "TERRACE": {"step_w": 71,  "step_h": 65}, 
+    "HORIZONT":{"step_w": 130, "step_h": 65}, 
+    "STAR":    {"step_w": 130, "step_h": 65}, 
     "DEFAULT": {"step_w": 100, "step_h": 50}
 }
 
@@ -117,17 +115,14 @@ def geometry_segment_area(width_mm, height_mm):
     v = height_mm
     
     try:
-        # Radius R z tětivy a výšky
         R = ((s**2 / 4) + v**2) / (2 * v)
         if R <= 0: return 0, 0
         
-        # Úhel alfa
         ratio = s / (2 * R)
         if ratio > 1: ratio = 1
         if ratio < -1: ratio = -1
         alpha_rad = 2 * math.asin(ratio)
         
-        # Délka a Plocha
         arc_len = alpha_rad * R
         area = 0.5 * (R**2) * (alpha_rad - math.sin(alpha_rad))
         
@@ -136,37 +131,25 @@ def geometry_segment_area(width_mm, height_mm):
         return 0, 0
 
 def calculate_complex_geometry(model_name, width_input_mm, height_input_mm, modules, total_length_mm):
-    """
-    Počítá geometrii teleskopického zastřešení.
-    Předpoklad: width_input je NEJMENŠÍ modul (Vnitřní).
-    Každý další modul je větší o step_w a step_h.
-    """
-    # Načtení parametrů modelu
     params = MODEL_PARAMS.get(model_name.upper(), MODEL_PARAMS["DEFAULT"])
     step_w = params["step_w"]
     step_h = params["step_h"]
 
-    # Modul 1 (Nejmenší/Vnitřní) - Malé čelo
     w_small = width_input_mm
     h_small = height_input_mm
     area_face_small, arc_small = geometry_segment_area(w_small, h_small)
     
-    # Modul N (Největší/Vnější) - Velké čelo
-    # w_large = w_small + (modules - 1) * step
     w_large = width_input_mm + ((modules - 1) * step_w)
     h_large = height_input_mm + ((modules - 1) * step_h)
     area_face_large, arc_large = geometry_segment_area(w_large, h_large)
     
-    # Plocha střechy (Součet všech modulů)
     mod_len_avg = total_length_mm / modules
     total_roof_area = 0
     
     for i in range(modules):
-        # Modul i (0..N-1), kde 0 je nejmenší
         w_i = width_input_mm + (i * step_w)
         h_i = height_input_mm + (i * step_h)
         _, arc_i = geometry_segment_area(w_i, h_i)
-        
         total_roof_area += (arc_i * (mod_len_avg / 1000.0))
         
     return total_roof_area, area_face_large, area_face_small
@@ -707,15 +690,13 @@ else:
             c_montaz = mat_sum * val
             items.append({"pol": "Montáž (ČR)", "det": f"{val*100:.0f}% z materiálu", "cen": c_montaz})
         
-        # SLEVA
-        sum_before_discount = sum(x['cen'] for x in items)
-        
+        # SLEVA (Opraveno: Základ je mat_sum, tedy cena BEZ montáže a dopravy)
         discount_val = 0
         if sleva_pct > 0:
-            discount_val = sum_before_discount * (sleva_pct / 100.0)
-            items.append({"pol": "SLEVA", "det": f"-{sleva_pct}% (bez dopravy)", "cen": -discount_val})
+            discount_val = mat_sum * (sleva_pct / 100.0)
+            items.append({"pol": "SLEVA", "det": f"-{sleva_pct}% (z materiálu)", "cen": -discount_val})
         
-        # DOPRAVA
+        # DOPRAVA (Až po slevě)
         c_doprava = 0 if km == 0 else km * cena_za_km
         if km > 0:
             items.append({"pol": "Doprava", "det": f"{km} km x {cena_za_km} Kč", "cen": c_doprava})
@@ -730,7 +711,6 @@ else:
         with col1:
             st.subheader("Rozpočet")
             st.dataframe(pd.DataFrame(items), hide_index=True, use_container_width=True)
-            # Debug info pro tebe, Martina:
             st.caption(f"ℹ️ {model}: odskok šířky {MODEL_PARAMS.get(model, MODEL_PARAMS['DEFAULT'])['step_w']}mm")
         with col2:
             st.subheader("Celkem")
