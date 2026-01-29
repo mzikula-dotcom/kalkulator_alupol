@@ -12,19 +12,18 @@ from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, 
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy import func
 
-# --- DEFINICE MODELŮ (Dle výpočty.xlsx) ---
+# --- DEFINICE MODELŮ A OBRÁZKŮ ---
 MODEL_PARAMS = {
-    "PRACTIC": {"step_w": 100, "step_h": 50},
-    "DREAM":   {"step_w": 130, "step_h": 65},
-    "HARMONY": {"step_w": 130, "step_h": 65},
-    "ROCK":    {"step_w": 130, "step_h": 65},
-    "TERRACE": {"step_w": 71,  "step_h": 65}, 
-    "HORIZONT":{"step_w": 130, "step_h": 65}, 
-    "STAR":    {"step_w": 130, "step_h": 65}, 
-    "DEFAULT": {"step_w": 100, "step_h": 50}
+    "PRACTIC": {"step_w": 100, "step_h": 50, "img": "practic.png"},
+    "DREAM":   {"step_w": 130, "step_h": 65, "img": "dream.png"},
+    "HARMONY": {"step_w": 130, "step_h": 65, "img": "harmony.png"},
+    "ROCK":    {"step_w": 130, "step_h": 65, "img": "rock.png"},
+    "TERRACE": {"step_w": 71,  "step_h": 65, "img": "terrace.png"}, 
+    "HORIZONT":{"step_w": 130, "step_h": 65, "img": "horizont.png"}, 
+    "STAR":    {"step_w": 130, "step_h": 65, "img": "star.png"}, 
+    "DEFAULT": {"step_w": 100, "step_h": 50, "img": None}
 }
 
-# Tabulka standardních délek
 STD_LENGTHS = {
     2: 4336,
     3: 6446,
@@ -104,28 +103,22 @@ def parse_value_clean(val):
     except: return 0
 
 # ########################################
-# 3. GEOMETRIE (Dle Modelu)
+# 3. GEOMETRIE
 # ########################################
 def geometry_segment_area(width_mm, height_mm):
-    """Vypočítá plochu kruhové úseče (čela) v m2 a délku oblouku v m."""
     if width_mm <= 0: return 0, 0
     if height_mm <= 0: height_mm = 1
-    
     s = width_mm
     v = height_mm
-    
     try:
         R = ((s**2 / 4) + v**2) / (2 * v)
         if R <= 0: return 0, 0
-        
         ratio = s / (2 * R)
         if ratio > 1: ratio = 1
         if ratio < -1: ratio = -1
         alpha_rad = 2 * math.asin(ratio)
-        
         arc_len = alpha_rad * R
         area = 0.5 * (R**2) * (alpha_rad - math.sin(alpha_rad))
-        
         return area / 1_000_000, arc_len / 1000
     except:
         return 0, 0
@@ -145,7 +138,6 @@ def calculate_complex_geometry(model_name, width_input_mm, height_input_mm, modu
     
     mod_len_avg = total_length_mm / modules
     total_roof_area = 0
-    
     for i in range(modules):
         w_i = width_input_mm + (i * step_w)
         h_i = height_input_mm + (i * step_h)
@@ -179,13 +171,11 @@ def calculate_base_price_db(model, width_mm, modules):
         count = session.query(Cenik).filter(Cenik.model == model).count()
         if count == 0: 
             if model == "PRACTIC": return 0,0, "Ceník je prázdný!"
-        
         row = session.query(Cenik).filter(
             Cenik.model == model,
             Cenik.moduly == modules,
             Cenik.sirka_mm >= width_mm
         ).order_by(Cenik.sirka_mm.asc()).first()
-
         if row:
             return row.cena, row.vyska * 1000, None
         else:
@@ -235,6 +225,7 @@ def delete_offer(offer_id):
 # 5. PDF GENERATOR
 # ########################################
 def img_to_base64(img_path):
+    # Pokus najít soubor (ignorovat velikost písmen)
     if not os.path.exists(img_path):
         for f in os.listdir('.'):
             if f.lower() == img_path.lower():
@@ -245,9 +236,15 @@ def img_to_base64(img_path):
             return base64.b64encode(img_file.read()).decode('utf-8')
     return None
 
-def generate_pdf_html(zak_udaje, items, totals):
+def generate_pdf_html(zak_udaje, items, totals, model_name):
     logo_b64 = img_to_base64("logo.png")
     mnich_b64 = img_to_base64("mnich.png")
+    
+    # Načtení obrázku modelu
+    params = MODEL_PARAMS.get(model_name.upper(), MODEL_PARAMS["DEFAULT"])
+    img_filename = params.get("img")
+    model_img_b64 = img_to_base64(img_filename) if img_filename else None
+
     html_template = """
     <!DOCTYPE html>
     <html lang="cs">
@@ -265,6 +262,8 @@ def generate_pdf_html(zak_udaje, items, totals):
             .col { width: 48%; }
             .col-header { color: #004b96; font-weight: bold; font-size: 16px; margin-bottom: 5px; border-bottom: 1px solid #ddd; padding-bottom: 5px; }
             .info-text { margin: 2px 0; }
+            .model-preview { text-align: center; margin: 20px 0; }
+            .model-img { max-width: 80%; height: auto; border-radius: 5px; border: 1px solid #eee; }
             .items-table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
             .items-table th { background-color: #004b96; color: white; padding: 10px; text-align: left; }
             .items-table td { padding: 10px; border-bottom: 1px solid #eee; }
@@ -282,8 +281,10 @@ def generate_pdf_html(zak_udaje, items, totals):
             <div>{% if logo_b64 %}<img src="data:image/png;base64,{{ logo_b64 }}" class="logo">{% else %}<h1>Rentmil s.r.o.</h1>{% endif %}</div>
             <div>{% if mnich_b64 %}<img src="data:image/png;base64,{{ mnich_b64 }}" class="mnich">{% endif %}</div>
         </div>
+        
         <div class="title">CENOVÁ NABÍDKA</div>
         <div class="divider"></div>
+        
         <div class="info-grid">
             <div class="col">
                 <div class="col-header">DODAVATEL</div>
@@ -307,6 +308,13 @@ def generate_pdf_html(zak_udaje, items, totals):
                 <div class="info-text">Platnost do: <strong>{{ data.platnost }}</strong></div>
             </div>
         </div>
+
+        {% if model_img_b64 %}
+        <div class="model-preview">
+            <img src="data:image/png;base64,{{ model_img_b64 }}" class="model-img">
+        </div>
+        {% endif %}
+
         <table class="items-table">
             <thead>
                 <tr>
@@ -325,6 +333,7 @@ def generate_pdf_html(zak_udaje, items, totals):
                 {% endfor %}
             </tbody>
         </table>
+        
         <div class="totals">
             <div class="total-row">
                 <span>Cena bez DPH:</span>
@@ -351,7 +360,7 @@ def generate_pdf_html(zak_udaje, items, totals):
     </html>
     """
     template = Template(html_template)
-    html_content = template.render(data=zak_udaje, items=items, totals=totals, logo_b64=logo_b64, mnich_b64=mnich_b64)
+    html_content = template.render(data=zak_udaje, items=items, totals=totals, logo_b64=logo_b64, mnich_b64=mnich_b64, model_img_b64=model_img_b64)
     with sync_playwright() as p:
         browser = p.chromium.launch()
         page = browser.new_page()
@@ -690,13 +699,15 @@ else:
             c_montaz = mat_sum * val
             items.append({"pol": "Montáž (ČR)", "det": f"{val*100:.0f}% z materiálu", "cen": c_montaz})
         
-        # SLEVA (Opraveno: Základ je mat_sum, tedy cena BEZ montáže a dopravy)
+        # SLEVA
+        sum_before_discount = sum(x['cen'] for x in items)
+        
         discount_val = 0
         if sleva_pct > 0:
-            discount_val = mat_sum * (sleva_pct / 100.0)
-            items.append({"pol": "SLEVA", "det": f"-{sleva_pct}% (z materiálu)", "cen": -discount_val})
+            discount_val = sum_before_discount * (sleva_pct / 100.0)
+            items.append({"pol": "SLEVA", "det": f"-{sleva_pct}% (bez dopravy)", "cen": -discount_val})
         
-        # DOPRAVA (Až po slevě)
+        # DOPRAVA
         c_doprava = 0 if km == 0 else km * cena_za_km
         if km > 0:
             items.append({"pol": "Doprava", "det": f"{km} km x {cena_za_km} Kč", "cen": c_doprava})
@@ -722,7 +733,7 @@ else:
                 if zak_jmeno:
                     zak_udaje = {'jmeno': zak_jmeno, 'adresa': zak_adresa, 'tel': zak_tel, 'email': zak_email, 'vypracoval': vypracoval, 'datum': datum_vystaveni.strftime("%d.%m.%Y"), 'platnost': platnost_do.strftime("%d.%m.%Y"), 'termin': termin_dodani}
                     totals = {'bez_dph': total_no_vat, 'dph': dph_val, 's_dph': total_with_vat, 'sazba_dph': dph_sazba}
-                    pdf_data = generate_pdf_html(zak_udaje, items, totals)
+                    pdf_data = generate_pdf_html(zak_udaje, items, totals, model)
                     st.download_button("📄 PDF Nabídka", data=pdf_data, file_name=f"Nabidka_{zak_jmeno}.pdf", mime="application/pdf", type="primary")
             with c_a2:
                 if zak_jmeno:
