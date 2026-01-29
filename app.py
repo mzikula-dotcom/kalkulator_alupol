@@ -1,3 +1,4 @@
+Python
 import streamlit as st
 import pandas as pd
 import math
@@ -12,7 +13,21 @@ from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, 
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy import func
 
-# --- KONSTANTY A TABULKY ---
+# --- DEFINICE MODELŮ (Dle výpočty.xlsx) ---
+# step_width: o kolik je další modul širší (mm)
+# step_height: o kolik je další modul vyšší (mm)
+MODEL_PARAMS = {
+    "PRACTIC": {"step_w": 100, "step_h": 50},
+    "DREAM":   {"step_w": 130, "step_h": 65},
+    "HARMONY": {"step_w": 130, "step_h": 65},
+    "ROCK":    {"step_w": 130, "step_h": 65},
+    "TERRACE": {"step_w": 71,  "step_h": 65}, # 70.6 zaokrouhleno
+    "HORIZONT":{"step_w": 130, "step_h": 65}, # Odhad (nenalezeno v xls), fallback na standard
+    "STAR":    {"step_w": 130, "step_h": 65}, # Odhad
+    "DEFAULT": {"step_w": 100, "step_h": 50}
+}
+
+# Tabulka standardních délek
 STD_LENGTHS = {
     2: 4336,
     3: 6446,
@@ -21,10 +36,6 @@ STD_LENGTHS = {
     6: 12776,
     7: 14886
 }
-
-# Geometrické konstanty pro PRACTIC
-STEP_WIDTH = 100  # Rozdíl šířky mezi moduly (mm)
-STEP_HEIGHT = 50  # Rozdíl výšky mezi moduly (mm)
 
 # Zkusíme importovat Playwright
 try:
@@ -96,64 +107,67 @@ def parse_value_clean(val):
     except: return 0
 
 # ########################################
-# 3. GEOMETRIE (Dle VBA)
+# 3. GEOMETRIE (Dle Modelu)
 # ########################################
 def geometry_segment_area(width_mm, height_mm):
-    """
-    Vypočítá plochu kruhové úseče (čela) a délku oblouku.
-    """
+    """Vypočítá plochu kruhové úseče (čela) v m2 a délku oblouku v m."""
     if width_mm <= 0: return 0, 0
-    if height_mm <= 0: height_mm = 1 # Ochrana dělení nulou
+    if height_mm <= 0: height_mm = 1
     
     s = width_mm
     v = height_mm
     
-    # Radius: R = ((s^2 / 4) + v^2) / (2*v)
     try:
+        # Radius R z tětivy a výšky
         R = ((s**2 / 4) + v**2) / (2 * v)
         if R <= 0: return 0, 0
         
-        # Úhel alfa (rad) = 2 * arcsin(s / (2*R))
+        # Úhel alfa
         ratio = s / (2 * R)
         if ratio > 1: ratio = 1
         if ratio < -1: ratio = -1
         alpha_rad = 2 * math.asin(ratio)
         
-        # Délka oblouku L = alpha * R
+        # Délka a Plocha
         arc_len = alpha_rad * R
-        
-        # Plocha úseče = 0.5 * R^2 * (alpha - sin(alpha))
         area = 0.5 * (R**2) * (alpha_rad - math.sin(alpha_rad))
         
-        return area / 1_000_000, arc_len / 1000 # m2, m
+        return area / 1_000_000, arc_len / 1000
     except:
         return 0, 0
 
-def calculate_complex_geometry(model, width_mm, height_mm, modules, total_length_mm):
+def calculate_complex_geometry(model_name, width_input_mm, height_input_mm, modules, total_length_mm):
     """
-    Počítá plochy pro Practic (teleskopický).
+    Počítá geometrii teleskopického zastřešení.
+    Předpoklad: width_input je NEJMENŠÍ modul (Vnitřní).
+    Každý další modul je větší o step_w a step_h.
     """
-    # 1. Velké čelo (První modul)
-    area_face_large, arc_large = geometry_segment_area(width_mm, height_mm)
-    
-    # 2. Malé čelo (Poslední modul)
-    w_small = width_mm - ((modules - 1) * STEP_WIDTH)
-    h_small = height_mm - ((modules - 1) * STEP_HEIGHT)
-    if h_small < 0: h_small = 0 # Ochrana
-    
+    # Načtení parametrů modelu
+    params = MODEL_PARAMS.get(model_name.upper(), MODEL_PARAMS["DEFAULT"])
+    step_w = params["step_w"]
+    step_h = params["step_h"]
+
+    # Modul 1 (Nejmenší/Vnitřní) - Malé čelo
+    w_small = width_input_mm
+    h_small = height_input_mm
     area_face_small, arc_small = geometry_segment_area(w_small, h_small)
     
-    # 3. Plocha střechy
+    # Modul N (Největší/Vnější) - Velké čelo
+    # w_large = w_small + (modules - 1) * step
+    w_large = width_input_mm + ((modules - 1) * step_w)
+    h_large = height_input_mm + ((modules - 1) * step_h)
+    area_face_large, arc_large = geometry_segment_area(w_large, h_large)
+    
+    # Plocha střechy (Součet všech modulů)
     mod_len_avg = total_length_mm / modules
     total_roof_area = 0
     
     for i in range(modules):
-        w_i = width_mm - (i * STEP_WIDTH)
-        h_i = height_mm - (i * STEP_HEIGHT)
-        if h_i < 0: h_i = 0
+        # Modul i (0..N-1), kde 0 je nejmenší
+        w_i = width_input_mm + (i * step_w)
+        h_i = height_input_mm + (i * step_h)
         _, arc_i = geometry_segment_area(w_i, h_i)
         
-        # Plocha pláště = délka oblouku * délka modulu
         total_roof_area += (arc_i * (mod_len_avg / 1000.0))
         
     return total_roof_area, area_face_large, area_face_small
@@ -163,7 +177,7 @@ def calculate_complex_geometry(model, width_mm, height_mm, modules, total_length
 # ########################################
 
 def get_surcharge_db(search_term, is_rock=False):
-    if not SessionLocal: return 0
+    if not SessionLocal: return {"fix": 0, "pct": 0}
     session = SessionLocal()
     cat = "Rock" if is_rock else "Standard"
     try:
@@ -171,7 +185,6 @@ def get_surcharge_db(search_term, is_rock=False):
         if not item and is_rock: 
              item = session.query(Priplatek).filter(Priplatek.kategorie == "Standard", Priplatek.nazev.ilike(f"%{search_term}%")).first()
         if item:
-            # Vrátíme dict s oběma hodnotami, abychom věděli co je co
             return {"fix": item.cena_fix, "pct": item.cena_pct}
         return {"fix": 0, "pct": 0}
     finally:
@@ -587,7 +600,6 @@ else:
             p_data = get_surcharge_db("Prodloužení modulu", is_rock)
             p_meter_data = get_surcharge_db("za metr", is_rock)
             
-            # Bezpečné získání cen
             fix_prod = p_data['fix'] if p_data['fix'] > 0 else 3000
             per_m = p_meter_data['fix'] if p_meter_data['fix'] > 0 else 2000
             
@@ -620,13 +632,13 @@ else:
             c = base_price * val
             items.append({"pol": "Příplatek Antracit", "det": f"{val*100:.0f}%", "cen": c})
 
-        # GEOMETRIE A POLY
+        # GEOMETRIE A POLY (S modelem)
         roof_a, face_a_large, face_a_small = calculate_complex_geometry(model, sirka, height, moduly, celkova_delka)
         p_data = get_surcharge_db("Plný polykarbonát", is_rock)
         
-        # ZDE JE KONTROLA: Polykarbonát musí mít fixní cenu. Pokud je 0, dáme fallback 1000.
+        # Ochrana: Cena poly musí být číslo (např. 1000), ne procento
         poly_p = p_data['fix']
-        if poly_p < 10: poly_p = 1000
+        if poly_p < 10: poly_p = 1000 # Fallback
         
         if poly_strecha:
             c = roof_a * poly_p
@@ -687,7 +699,6 @@ else:
             items.append({"pol": "Prodloužení dráhy", "det": f"+{ext_draha_m} m", "cen": c})
 
         # MONTÁŽ
-        # Spočítáme mezisoučet jen pro montáž
         mat_sum = sum(x['cen'] for x in items)
         
         c_montaz = 0
@@ -697,8 +708,7 @@ else:
             c_montaz = mat_sum * val
             items.append({"pol": "Montáž (ČR)", "det": f"{val*100:.0f}% z materiálu", "cen": c_montaz})
         
-        # SOUČET PRO SLEVU (Materiál + Montáž)
-        # Tady sčítáme vše co je doteď v items
+        # SLEVA
         sum_before_discount = sum(x['cen'] for x in items)
         
         discount_val = 0
@@ -706,15 +716,13 @@ else:
             discount_val = sum_before_discount * (sleva_pct / 100.0)
             items.append({"pol": "SLEVA", "det": f"-{sleva_pct}% (bez dopravy)", "cen": -discount_val})
         
-        # DOPRAVA (Až po slevě)
+        # DOPRAVA
         c_doprava = 0 if km == 0 else km * cena_za_km
         if km > 0:
             items.append({"pol": "Doprava", "det": f"{km} km x {cena_za_km} Kč", "cen": c_doprava})
 
-        # FINÁLNÍ SOUČET Z POLOŽEK
-        # Toto je ta klíčová změna - sčítáme finální items
+        # FINÁLNÍ SOUČET
         total_no_vat = sum(item['cen'] for item in items)
-        
         dph_val = total_no_vat * (dph_sazba / 100.0)
         total_with_vat = total_no_vat + dph_val
 
@@ -723,8 +731,8 @@ else:
         with col1:
             st.subheader("Rozpočet")
             st.dataframe(pd.DataFrame(items), hide_index=True, use_container_width=True)
-            # Debug poly plochy
-            st.caption(f"DEBUG: Střecha {roof_a:.2f}m2, Velké čelo {face_a_large:.2f}m2, Malé čelo {face_a_small:.2f}m2")
+            # Debug info pro tebe, Martina:
+            st.caption(f"ℹ️ {model}: odskok šířky {MODEL_PARAMS.get(model, MODEL_PARAMS['DEFAULT'])['step_w']}mm")
         with col2:
             st.subheader("Celkem")
             st.metric("Bez DPH", f"{total_no_vat:,.0f} Kč")
