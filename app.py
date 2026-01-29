@@ -12,6 +12,10 @@ from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, 
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy import func
 
+# --- KONSTANTY ---
+# Zde definujeme standardní délku jednoho modulu v mm (běžně 2190 mm)
+STD_MODUL_MM = 2190 
+
 # Zkusíme importovat Playwright
 try:
     from playwright.sync_api import sync_playwright
@@ -115,15 +119,15 @@ def calculate_base_price_db(model, width_mm, modules):
         ).order_by(Cenik.sirka_mm.asc()).first()
 
         if row:
-            length = modules * 2150 
-            return row.cena, row.vyska * 1000, length, None
+            # Délku zde nevracíme fixní, ta se bude počítat z UI inputu
+            return row.cena, row.vyska * 1000, None
         else:
             max_row = session.query(Cenik).filter(Cenik.model == model, Cenik.moduly == modules).order_by(Cenik.sirka_mm.desc()).first()
             if max_row:
-                return 0, 0, 0, f"Mimo rozsah (Max pro {model} je {max_row.sirka_mm} mm)"
-            return 0, 0, 0, "Rozměr nebo počet modulů nenalezen"
+                return 0, 0, f"Mimo rozsah (Max pro {model} je {max_row.sirka_mm} mm)"
+            return 0, 0, "Rozměr nebo počet modulů nenalezen"
     except Exception as e:
-        return 0,0,0, str(e)
+        return 0,0, str(e)
     finally:
         session.close()
 
@@ -307,11 +311,10 @@ def generate_pdf_html(zak_udaje, items, totals):
 st.sidebar.title("Navigace")
 page_mode = st.sidebar.radio("Režim:", ["Kalkulátor", "Historie Nabídek"])
 
-# --- SERVISNÍ ZÓNA (NOVÁ VERZE S TABS) ---
+# --- SERVISNÍ ZÓNA ---
 with st.sidebar.expander("🔐 Servisní zóna (Admin)"):
     tab_modely, tab_priplatky = st.tabs(["🏠 Ceníky Modelů", "➕ Příplatky"])
     
-    # 1. TAB MODELY
     with tab_modely:
         st.caption("Formát: 'Model;...\\n do 3m;...'")
         import_data_models = st.text_area("CSV Modely", height=150, key="imp_models")
@@ -351,7 +354,6 @@ with st.sidebar.expander("🔐 Servisní zóna (Admin)"):
                 finally:
                     session.close()
 
-    # 2. TAB PŘÍPLATKY
     with tab_priplatky:
         st.caption("Formát: 'Název; Cena Standard; Cena Rock'")
         import_data_extras = st.text_area("CSV Příplatky", height=150, key="imp_extras")
@@ -362,14 +364,12 @@ with st.sidebar.expander("🔐 Servisní zóna (Admin)"):
                 session = SessionLocal()
                 try:
                     session.query(Priplatek).delete()
-                    # Zde používáme středník jako oddělovač
                     df_p = pd.read_csv(io.StringIO(import_data_extras), sep=';', header=None)
                     counter = 0
                     for _, row in df_p.iterrows():
                         nazev = str(row[0]).strip()
                         if not nazev or pd.isna(nazev): continue
                         
-                        # Standard
                         val_std = row[1]
                         val_std_clean = parse_value_clean(val_std)
                         is_pct_std = isinstance(val_std, str) and '%' in val_std
@@ -378,7 +378,6 @@ with st.sidebar.expander("🔐 Servisní zóna (Admin)"):
                         session.add(p_std)
                         counter += 1
 
-                        # Rock (pokud je)
                         if len(row) > 2:
                             val_rock = row[2]
                             if pd.isna(val_rock) or str(val_rock).strip() == "": val_rock = val_std
@@ -468,6 +467,13 @@ else:
         is_rock = (model.upper() == "ROCK")
         sirka = st.number_input("Šířka (mm)", 2000, 8000, get_val('sirka', 3500), step=10)
         moduly = st.slider("Počet modulů", 2, 7, get_val('moduly', 3))
+        
+        # --- NOVÁ LOGIKA DÉLKY ---
+        std_len = moduly * STD_MODUL_MM
+        st.caption(f"Standardní délka pro {moduly} moduly: {std_len} mm")
+        celkova_delka = st.number_input("Celková délka (mm)", 2000, 20000, get_val('celkova_delka', std_len), step=10, help="Zadej skutečnou délku. Program sám dopočítá příplatky za prodloužení/zkrácení.")
+        
+        diff_len = celkova_delka - std_len
 
         st.markdown("---")
         st.header("2. Barvy a Polykarbonát")
@@ -475,57 +481,70 @@ else:
         def_barva = get_val('barva_typ', barvy_opts[0])
         barva_typ = st.selectbox("Barva konstrukce", barvy_opts, index=barvy_opts.index(def_barva) if def_barva in barvy_opts else 0)
         poly_strecha = st.checkbox("Plný polykarbonát - STŘECHA", value=get_val('poly_strecha', False))
-        poly_cela = st.checkbox("Plný polykarbonát - ČELA", value=get_val('poly_cela', False))
+        
+        col_poly1, col_poly2 = st.columns(2)
+        with col_poly1:
+             poly_celo_male = st.checkbox("Plný poly - MALÉ čelo", value=get_val('poly_celo_male', False))
+        with col_poly2:
+             poly_celo_velke = st.checkbox("Plný poly - VELKÉ čelo", value=get_val('poly_celo_velke', False))
+             
         change_color_poly = st.checkbox("Změna barvy polykarbonátu", value=get_val('change_color_poly', False))
 
         st.markdown("---")
-        st.header("3. Úpravy modulů")
-        zkraceni_ks = st.number_input("Zkrácení (ks)", 0, moduly, get_val('zkraceni_ks', 0))
-        prodlouzeni_ks = st.number_input("Prodloužení (ks)", 0, moduly, get_val('prodlouzeni_ks', 0))
-        prodlouzeni_mm = st.number_input("Délka prodloužení (mm)", 0, 2000, get_val('prodlouzeni_mm', 0), step=10)
-
-        st.markdown("---")
-        st.header("4. Doplňky")
+        st.header("3. Doplňky")
         pocet_dvere_vc = st.number_input("Dveře v čele (ks)", 0, 2, get_val('pocet_dvere_vc', 0))
         pocet_dvere_bok = st.number_input("Boční vstup (ks)", 0, 4, get_val('pocet_dvere_bok', 0))
         zamykaci_klika = st.checkbox("Zamykací klika", value=get_val('zamykaci_klika', False))
         klapka = st.checkbox("Větrací klapka", value=get_val('klapka', False))
         pochozi_koleje = st.checkbox("Pochozí koleje", value=get_val('pochozi_koleje', False))
+        pochozi_koleje_zdarma = st.checkbox("➡️ Akce: Koleje ZDARMA", value=get_val('pochozi_koleje_zdarma', False))
         ext_draha_m = st.number_input("Prodloužení dráhy (m)", 0.0, 20.0, get_val('ext_draha_m', 0.0), step=0.5)
         podhori = st.checkbox("Zpevnění Podhoří", value=get_val('podhori', False))
 
         st.markdown("---")
-        st.header("5. Ostatní")
+        st.header("4. Ostatní")
         km = st.number_input("Doprava (km)", 0, 5000, get_val('km', 0))
         montaz = st.checkbox("Montáž", value=get_val('montaz', True))
         sleva_pct = st.number_input("Sleva (%)", 0, 100, get_val('sleva_pct', 0))
         dph_sazba = st.selectbox("DPH", [21, 12, 0], index=0)
 
     # --- VÝPOČET ---
-    base_price, height, length, err = calculate_base_price_db(model, sirka, moduly)
+    base_price, height, err = calculate_base_price_db(model, sirka, moduly)
 
     if err:
         st.error(f"⚠️ {err}")
     else:
         items = []
-        items.append({"pol": f"Zastřešení {model}", "det": f"{moduly} seg., Š: {sirka}mm", "cen": base_price})
+        # Vypočteme průměrnou délku modulu pro zobrazení
+        avg_mod_len = int(celkova_delka / moduly)
+        items.append({"pol": f"Zastřešení {model}", "det": f"{moduly} seg., Š: {sirka}mm ({avg_mod_len} mm/mod)", "cen": base_price})
         running = base_price
 
-        if zkraceni_ks > 0:
-            val = get_surcharge_db("Zkrácení modulu", is_rock) or 1500
-            cost = zkraceni_ks * val
-            items.append({"pol": "Zkrácení modulů", "det": f"{zkraceni_ks} ks x {val} Kč", "cen": cost})
+        # --- LOGIKA PRODLOUŽENÍ / ZKRÁCENÍ (AUTOMATICKY) ---
+        if diff_len > 10: # Je to prodloužení (tolerance 10mm)
+            # Logika: Paušál za prodloužení + cena za mm navíc
+            fix_prod = get_surcharge_db("Prodloužení modulu", is_rock) or 3000
+            per_m = get_surcharge_db("za metr", is_rock) or 2000
+            
+            # Kolik celých metrů navíc? (zjednodušeně počítáme poměrnou část)
+            price_len = (diff_len / 1000.0) * per_m
+            
+            # Předpokládáme, že se prodlužuje alespoň jeden modul, nebo rovnoměrně
+            # Pro jednoduchost naúčtujeme fix za každý započatý metr navíc nebo prostě 1x fix? 
+            # ZADÁNÍ: "zjistit jestli je zastřešení prodloužené" -> obvykle se bere fix + metráž.
+            # Zde účtujeme 1x Fix + metráž za celkové prodloužení
+            
+            cost = fix_prod + price_len
+            items.append({"pol": "Atypická délka (Prodloužení)", "det": f"+{diff_len} mm", "cen": cost})
             running += cost
 
-        if prodlouzeni_ks > 0 and prodlouzeni_mm > 0:
-            fix = get_surcharge_db("Prodloužení modulu", is_rock) or 3000
-            per_m = get_surcharge_db("za metr", is_rock) or 2000
-            if fix == 0: fix = 3000
-            if per_m == 0: per_m = 2000
-            c = prodlouzeni_ks * (fix + (prodlouzeni_mm/1000.0 * per_m))
-            items.append({"pol": "Prodloužení modulů", "det": f"{prodlouzeni_ks} ks á {prodlouzeni_mm}mm", "cen": c})
-            running += c
+        elif diff_len < -10: # Je to zkrácení
+            val = get_surcharge_db("Zkrácení modulu", is_rock) or 1500
+            # Účtujeme jedno zkrácení (protože se řeže celkové zastřešení)
+            items.append({"pol": "Atypická délka (Zkrácení)", "det": f"{diff_len} mm", "cen": val})
+            running += val
 
+        # Barvy
         if "Stříbrný" in barva_typ:
             val = base_price * -0.10
             items.append({"pol": "BONUS: Stříbrný Elox", "det": "Sleva 10% ze základu", "cen": val})
@@ -546,16 +565,25 @@ else:
             items.append({"pol": "Příplatek Antracit", "det": f"{val*100:.0f}%", "cen": c})
             running += c
 
-        roof_a, face_a = calculate_geometry(sirka, height, length)
+        # Polykarbonát - ZMĚNA LOGIKY (Rozdělení čel)
+        roof_a, face_a_one = calculate_geometry(sirka, height, celkova_delka) # Use actual length
         poly_p = get_surcharge_db("Plný polykarbonát", is_rock) or 1000
+        
         if poly_strecha:
             c = roof_a * poly_p
             items.append({"pol": "Plný poly (Střecha)", "det": f"{roof_a:.1f} m²", "cen": c})
             running += c
-        if poly_cela:
-            c = (face_a * 2) * poly_p
-            items.append({"pol": "Plný poly (Čela)", "det": f"{face_a*2:.1f} m²", "cen": c})
+            
+        if poly_celo_male:
+            c = face_a_one * poly_p
+            items.append({"pol": "Plný poly (Malé čelo)", "det": f"{face_a_one:.1f} m²", "cen": c})
             running += c
+            
+        if poly_celo_velke:
+            c = face_a_one * poly_p
+            items.append({"pol": "Plný poly (Velké čelo)", "det": f"{face_a_one:.1f} m²", "cen": c})
+            running += c
+
         if change_color_poly:
             val = get_surcharge_db("barvy poly", is_rock) or 0.07
             c = base_price * val
@@ -594,16 +622,20 @@ else:
             running += val
 
         if pochozi_koleje:
-            m_rail = (length / 1000.0) * 2
-            val = get_surcharge_db("Pochozí kolejnice", is_rock) or 330
-            c = m_rail * val
-            items.append({"pol": "Pochozí koleje", "det": f"{m_rail:.1f} m", "cen": c})
-            running += c
+            m_rail = (celkova_delka / 1000.0) * 2
+            if pochozi_koleje_zdarma:
+                items.append({"pol": "Pochozí koleje", "det": f"{m_rail:.1f} m (AKCE)", "cen": 0})
+            else:
+                val = get_surcharge_db("Pochozí kolejnice", is_rock) or 330
+                c = m_rail * val
+                items.append({"pol": "Pochozí koleje", "det": f"{m_rail:.1f} m", "cen": c})
+                running += c
 
+        # --- ZMĚNA LOGIKY (Nenásobit dvěma) ---
         if ext_draha_m > 0:
-            m_rail_ext = ext_draha_m * 2
             val = get_surcharge_db("Jeden metr koleje", is_rock) or 220
-            c = m_rail_ext * val
+            # Zde již NENÁSOBÍME dvěma, bereme vstup jako finální metráž k nacenění
+            c = ext_draha_m * val
             items.append({"pol": "Prodloužení dráhy", "det": f"+{ext_draha_m} m", "cen": c})
             running += c
 
@@ -649,11 +681,13 @@ else:
                         save_data = {
                             'zak_jmeno': zak_jmeno, 'zak_adresa': zak_adresa, 'zak_tel': zak_tel, 'zak_email': zak_email,
                             'vypracoval': vypracoval, 'platnost_dny': platnost_dny, 'termin_dodani': termin_dodani,
-                            'model': model, 'sirka': sirka, 'moduly': moduly, 'barva_typ': barva_typ,
-                            'poly_strecha': poly_strecha, 'poly_cela': poly_cela, 'change_color_poly': change_color_poly,
-                            'zkraceni_ks': zkraceni_ks, 'prodlouzeni_ks': prodlouzeni_ks, 'prodlouzeni_mm': prodlouzeni_mm,
+                            'model': model, 'sirka': sirka, 'moduly': moduly, 'celkova_delka': celkova_delka,
+                            'barva_typ': barva_typ,
+                            'poly_strecha': poly_strecha, 'poly_celo_male': poly_celo_male, 'poly_celo_velke': poly_celo_velke,
+                            'change_color_poly': change_color_poly,
                             'pocet_dvere_vc': pocet_dvere_vc, 'pocet_dvere_bok': pocet_dvere_bok,
-                            'zamykaci_klika': zamykaci_klika, 'klapka': klapka, 'pochozi_koleje': pochozi_koleje,
+                            'zamykaci_klika': zamykaci_klika, 'klapka': klapka, 
+                            'pochozi_koleje': pochozi_koleje, 'pochozi_koleje_zdarma': pochozi_koleje_zdarma,
                             'ext_draha_m': ext_draha_m, 'podhori': podhori, 'km': km, 'montaz': montaz, 'sleva_pct': sleva_pct,
                             'dph_sazba': dph_sazba
                         }
