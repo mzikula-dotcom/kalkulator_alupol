@@ -225,22 +225,23 @@ def delete_offer(offer_id):
 # 5. PDF GENERATOR
 # ########################################
 def img_to_base64(img_path):
-    # Pokus najít soubor (ignorovat velikost písmen)
-    if not os.path.exists(img_path):
-        for f in os.listdir('.'):
-            if f.lower() == img_path.lower():
-                img_path = f
-                break
-    if os.path.exists(img_path):
-        with open(img_path, "rb") as img_file:
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    full_path = os.path.join(current_dir, img_path)
+    if os.path.exists(full_path):
+        with open(full_path, "rb") as img_file:
             return base64.b64encode(img_file.read()).decode('utf-8')
+    files = os.listdir(current_dir)
+    for f in files:
+        if f.lower() == img_path.lower():
+            full_path = os.path.join(current_dir, f)
+            with open(full_path, "rb") as img_file:
+                return base64.b64encode(img_file.read()).decode('utf-8')
     return None
 
 def generate_pdf_html(zak_udaje, items, totals, model_name):
     logo_b64 = img_to_base64("logo.png")
     mnich_b64 = img_to_base64("mnich.png")
     
-    # Načtení obrázku modelu
     params = MODEL_PARAMS.get(model_name.upper(), MODEL_PARAMS["DEFAULT"])
     img_filename = params.get("img")
     model_img_b64 = img_to_base64(img_filename) if img_filename else None
@@ -253,25 +254,40 @@ def generate_pdf_html(zak_udaje, items, totals, model_name):
         <style>
             @page { margin: 2cm; size: A4; }
             body { font-family: 'Helvetica', 'Arial', sans-serif; color: #333; font-size: 14px; line-height: 1.4; }
-            .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
-            .logo { max-width: 250px; height: auto; }
-            .mnich { max-width: 100px; height: auto; }
+            
+            /* HLAVIČKA */
+            .header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 20px; }
+            .logo { max-width: 180px; height: auto; } /* Zmenšeno o 25% (původně 250px) */
+            
+            .right-header { text-align: center; display: flex; flex-direction: column; align-items: center; }
+            .mnich { max-width: 100px; height: auto; margin-bottom: 5px; }
+            .slogan { font-size: 12px; font-weight: bold; color: #555; font-style: italic; }
+
             .title { text-align: center; color: #004b96; font-size: 28px; font-weight: bold; margin-top: 10px; margin-bottom: 10px; }
             .divider { border-bottom: 3px solid #f07800; margin-bottom: 30px; }
+            
             .info-grid { display: flex; justify-content: space-between; margin-bottom: 30px; }
             .col { width: 48%; }
             .col-header { color: #004b96; font-weight: bold; font-size: 16px; margin-bottom: 5px; border-bottom: 1px solid #ddd; padding-bottom: 5px; }
             .info-text { margin: 2px 0; }
-            .model-preview { text-align: center; margin: 20px 0; }
-            .model-img { max-width: 80%; height: auto; border-radius: 5px; border: 1px solid #eee; }
+            
+            /* ZÓNA OBRÁZKU */
+            .model-section { text-align: center; margin: 30px 0; }
+            .model-intro { font-size: 14px; color: #333; margin-bottom: 5px; }
+            .model-name-highlight { font-size: 22px; font-weight: bold; color: #004b96; text-transform: uppercase; margin-bottom: 15px; display: block; }
+            .model-img { max-width: 60%; height: auto; border-radius: 5px; } /* Zmenšeno o 20% (původně 80%) */
+
+            /* TABULKA */
             .items-table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
             .items-table th { background-color: #004b96; color: white; padding: 10px; text-align: left; }
             .items-table td { padding: 10px; border-bottom: 1px solid #eee; }
             .items-table tr:nth-child(even) { background-color: #f9f9f9; }
             .price-col { text-align: right; white-space: nowrap; }
+            
             .totals { float: right; width: 40%; text-align: right; }
             .total-row { display: flex; justify-content: space-between; margin: 5px 0; }
             .grand-total { font-size: 24px; color: #f07800; font-weight: bold; margin-top: 10px; border-top: 2px solid #f07800; padding-top: 5px; }
+            
             .footer { clear: both; margin-top: 50px; padding-top: 20px; border-top: 1px solid #004b96; font-size: 12px; color: #666; text-align: center; }
             .note { background-color: #e6f2ff; padding: 15px; border-left: 5px solid #004b96; margin-top: 20px; margin-bottom: 20px; font-style: italic; }
         </style>
@@ -279,7 +295,10 @@ def generate_pdf_html(zak_udaje, items, totals, model_name):
     <body>
         <div class="header">
             <div>{% if logo_b64 %}<img src="data:image/png;base64,{{ logo_b64 }}" class="logo">{% else %}<h1>Rentmil s.r.o.</h1>{% endif %}</div>
-            <div>{% if mnich_b64 %}<img src="data:image/png;base64,{{ mnich_b64 }}" class="mnich">{% endif %}</div>
+            <div class="right-header">
+                {% if mnich_b64 %}<img src="data:image/png;base64,{{ mnich_b64 }}" class="mnich">{% endif %}
+                <div class="slogan">Zastřešení v klidu</div>
+            </div>
         </div>
         
         <div class="title">CENOVÁ NABÍDKA</div>
@@ -310,7 +329,9 @@ def generate_pdf_html(zak_udaje, items, totals, model_name):
         </div>
 
         {% if model_img_b64 %}
-        <div class="model-preview">
+        <div class="model-section">
+            <div class="model-intro">Připravili jsme pro vás nabídku zastřešení:</div>
+            <span class="model-name-highlight">{{ data.model }}</span>
             <img src="data:image/png;base64,{{ model_img_b64 }}" class="model-img">
         </div>
         {% endif %}
@@ -359,8 +380,10 @@ def generate_pdf_html(zak_udaje, items, totals, model_name):
     </body>
     </html>
     """
+    data_w_model = zak_udaje.copy()
+    data_w_model['model'] = model_name
     template = Template(html_template)
-    html_content = template.render(data=zak_udaje, items=items, totals=totals, logo_b64=logo_b64, mnich_b64=mnich_b64, model_img_b64=model_img_b64)
+    html_content = template.render(data=data_w_model, items=items, totals=totals, logo_b64=logo_b64, mnich_b64=mnich_b64, model_img_b64=model_img_b64)
     with sync_playwright() as p:
         browser = p.chromium.launch()
         page = browser.new_page()
