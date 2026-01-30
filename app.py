@@ -191,16 +191,18 @@ def calculate_extension_price_dynamic(model, width_mm, modules):
         row_curr = session.query(Cenik).filter(Cenik.model == model, Cenik.moduly == modules, Cenik.sirka_mm >= width_mm).order_by(Cenik.sirka_mm.asc()).first()
         row_next = session.query(Cenik).filter(Cenik.model == model, Cenik.moduly == modules + 1, Cenik.sirka_mm >= width_mm).order_by(Cenik.sirka_mm.asc()).first()
         
+        # Standardní délka modulu (2110mm) - toto je délka materiálu, který se počítá dynamicky
+        mod_len = 2110.0 
+        
         if row_curr and row_next:
             price_diff = row_next.cena - row_curr.cena
-            mod_len = 2150.0 
             price_per_meter = price_diff / (mod_len / 1000.0)
             return price_per_meter
         else:
             row_prev = session.query(Cenik).filter(Cenik.model == model, Cenik.moduly == modules - 1, Cenik.sirka_mm >= width_mm).order_by(Cenik.sirka_mm.asc()).first()
             if row_curr and row_prev:
                 price_diff = row_curr.cena - row_prev.cena
-                price_per_meter = price_diff / (2150.0 / 1000.0)
+                price_per_meter = price_diff / (mod_len / 1000.0)
                 return price_per_meter
             return 5000
     finally:
@@ -617,8 +619,9 @@ else:
         
         if diff_len > 10:
             price_per_m = calculate_extension_price_dynamic(model, sirka, moduly)
-            p_atyp = get_surcharge_db("Atypická délka", is_rock)
-            fix_cost_per_module = p_atyp['fix'] if p_atyp['fix'] > 0 else 1500
+            # Hledáme položku "Prodloužení modulu za metr", ale používáme ji jako fix za modul (logika Excelu)
+            p_fix_mod = get_surcharge_db("Prodloužení modulu za metr", is_rock)
+            fix_cost_per_module = p_fix_mod['fix'] if p_fix_mod['fix'] > 0 else 2000
             
             total_extension_cost = ((diff_len / 1000.0) * price_per_m) + (pocet_prod_modulu * fix_cost_per_module)
             
