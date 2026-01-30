@@ -13,20 +13,18 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy import func
 
 # --- VERZE APLIKACE ---
-APP_VERSION = "44.1 (Fix)"
+APP_VERSION = "46.0"
 
 # --- KONFIGURACE VÝROBY ---
 ROOF_OVERLAP_MM = 100 
 FACE_WASTE_COEF = 0.85 
+# Koeficient pro přepočet skutečné plochy polykarbonátu na "ceníkovou plochu" Excelu
+# Excel používá cca 6.2 m2 pro Wave 3s, realita je cca 16.5 m2. Poměr = 0.378 -> 0.38
+POLY_PRICING_FACTOR = 0.38 
 
-# --- CENÍK PRODLOUŽENÍ KOLEJÍ (Z tabulky Ceníky - řádek 2) ---
+# --- CENÍK PRODLOUŽENÍ KOLEJÍ ---
 RAIL_EXTENSION_PRICES = {
-    2: 910,
-    3: 2730,
-    4: 5460,
-    5: 9100,
-    6: 13650,
-    7: 19106
+    2: 910, 3: 2730, 4: 5460, 5: 9100, 6: 13650, 7: 19106
 }
 
 # --- DEFINICE MODELŮ A OBRÁZKŮ ---
@@ -46,12 +44,7 @@ MODEL_PARAMS = {
 }
 
 STD_LENGTHS = {
-    2: 4336,
-    3: 6446,
-    4: 8556,
-    5: 10666,
-    6: 12776,
-    7: 14886
+    2: 4336, 3: 6446, 4: 8556, 5: 10666, 6: 12776, 7: 14886
 }
 
 try:
@@ -134,7 +127,6 @@ def geometry_segment_area(width_mm, height_mm):
     production_area = raw_rect_area * FACE_WASTE_COEF
     return production_area, arc_len / 1000
 
-# OPRAVENÁ FUNKCE - VRACÍ 4 HODNOTY
 def calculate_complex_geometry(model_name, width_input_mm, height_input_mm, modules, total_length_mm):
     params = MODEL_PARAMS.get(model_name.upper(), MODEL_PARAMS["DEFAULT"])
     step_w = params["step_w"]
@@ -152,7 +144,7 @@ def calculate_complex_geometry(model_name, width_input_mm, height_input_mm, modu
     sheet_len_m = (mod_len_mm + ROOF_OVERLAP_MM) / 1000.0
     
     total_roof_area = 0
-    total_arc_len_m = 0 # Inicializace proměnné
+    total_arc_len_m = 0
     
     for i in range(modules):
         w_i = width_input_mm + (i * step_w)
@@ -160,7 +152,7 @@ def calculate_complex_geometry(model_name, width_input_mm, height_input_mm, modu
         _, arc_len_i = geometry_segment_area(w_i, h_i)
         
         total_roof_area += (arc_len_i * sheet_len_m)
-        total_arc_len_m += arc_len_i # Sčítání délek oblouků
+        total_arc_len_m += arc_len_i 
         
     return total_roof_area, area_face_large, area_face_small, total_arc_len_m
 
@@ -199,30 +191,6 @@ def calculate_base_price_db(model, width_mm, modules):
             return 0, 0, "Rozměr nebo počet modulů nenalezen"
     except Exception as e:
         return 0,0, str(e)
-    finally:
-        session.close()
-
-def calculate_extension_price_final(model, width_mm, modules):
-    if not SessionLocal: return 0
-    session = SessionLocal()
-    try:
-        row_curr = session.query(Cenik).filter(Cenik.model == model, Cenik.moduly == modules, Cenik.sirka_mm >= width_mm).order_by(Cenik.sirka_mm.asc()).first()
-        row_next = session.query(Cenik).filter(Cenik.model == model, Cenik.moduly == modules + 1, Cenik.sirka_mm >= width_mm).order_by(Cenik.sirka_mm.asc()).first()
-        
-        mod_len = 2110.0
-        
-        structure_part = 0
-        if row_curr and row_next:
-            structure_part = row_next.cena - row_curr.cena
-        else:
-            row_prev = session.query(Cenik).filter(Cenik.model == model, Cenik.moduly == modules - 1, Cenik.sirka_mm >= width_mm).order_by(Cenik.sirka_mm.asc()).first()
-            if row_curr and row_prev:
-                structure_part = row_curr.cena - row_prev.cena
-        
-        rail_part = RAIL_EXTENSION_PRICES.get(modules, 0)
-        
-        price_per_meter = (structure_part + rail_part) / (mod_len / 1000.0)
-        return price_per_meter
     finally:
         session.close()
 
@@ -635,20 +603,23 @@ else:
         avg_mod_len = int(celkova_delka / moduly)
         items.append({"pol": f"Zastřešení {model}", "det": f"{moduly} seg., Š: {sirka}mm ({avg_mod_len} mm/mod)", "cen": base_price})
         
-        # NOVÝ VÝPOČET PRODLOUŽENÍ (V44.0 LOGIKA)
-        roof_a, face_a_large, face_a_small, total_arc_len_m = calculate_complex_geometry(model, sirka, height, moduly, celkova_delka) # 4 hodnoty
+        # PRODLOUŽENÍ (VÝPOČET 46.0 - S KOREKCÍ PLOCHY)
+        roof_a, face_a_large, face_a_small, total_arc_len_m = calculate_complex_geometry(model, sirka, height, moduly, celkova_delka)
         
         if diff_len > 10:
-            price_per_m = calculate_extension_price_final(model, sirka, moduly)
+            # 1. FIX: Počet modulů * 3000
+            p_fix_mod = get_surcharge_db("Prodloužení modulu", is_rock)
+            fix_price = p_fix_mod['fix'] if p_fix_mod['fix'] > 0 else 3000
+            total_fix = pocet_prod_modulu * fix_price
             
-            p_fix1 = get_surcharge_db("Prodloužení modulu", is_rock)
-            p_fix2 = get_surcharge_db("Prodloužení modulu za metr", is_rock)
+            # 2. VAR: (Celková délka oblouků * Faktor) * Prodloužení (m) * 2000
+            p_var_mat = get_surcharge_db("Prodloužení modulu za metr", is_rock)
+            mat_price_unit = p_var_mat['fix'] if p_var_mat['fix'] > 0 else 2000
             
-            val_fix1 = p_fix1['fix'] if p_fix1['fix'] > 0 else 3000
-            val_fix2 = p_fix2['fix'] if p_fix2['fix'] > 0 else 2000
-            fix_cost = val_fix1 + val_fix2
+            # Vzorec: (Celková délka oblouků * POLY_PRICING_FACTOR) * (Prodloužení v metrech) * Cena za m2
+            total_var = (total_arc_len_m * POLY_PRICING_FACTOR) * (diff_len / 1000.0) * mat_price_unit
             
-            total_extension_cost = ((diff_len / 1000.0) * price_per_m) + fix_cost
+            total_extension_cost = total_fix + total_var
             
             items.append({
                 "pol": f"Prodloužení {pocet_prod_modulu} modulů (Atyp)", 
