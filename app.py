@@ -14,7 +14,7 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy import func
 
 # --- VERZE APLIKACE ---
-APP_VERSION = "54.1 (Fix st.rerun)"
+APP_VERSION = "55.0 (All Expanded)"
 
 # --- HESLO ADMINA ---
 ADMIN_PASSWORD = "admin123"
@@ -58,6 +58,7 @@ st.markdown("""
         .block-container {padding-top: 1rem; padding-bottom: 2rem; padding-left: 3rem; padding-right: 3rem;}
         h1 {padding-top: 0rem;}
         .metric-card {background-color: #f0f2f6; padding: 15px; border-radius: 10px; border-left: 5px solid #004b96;}
+        div[data-testid="stExpander"] div[role="button"] p {font-size: 1.1rem; font-weight: bold; color: #004b96;}
     </style>
 """, unsafe_allow_html=True)
 
@@ -544,7 +545,7 @@ if app_mode == "Kalkulátor":
                 if pocet_dvere_bok > 0:
                     dvere_bok_umisteni = st.selectbox("Umístění", ["Vlevo", "Vpravo", "Oboustranně"])
 
-        with st.expander("Ostatní doplňky", expanded=False):
+        with st.expander("Ostatní doplňky", expanded=True):
             c_x1, c_x2 = st.columns(2)
             with c_x1:
                 zamykaci_klika = st.checkbox("Zamykací klika", value=get_val('zamykaci_klika', False))
@@ -555,7 +556,7 @@ if app_mode == "Kalkulátor":
                 bez_velkeho_cela = st.checkbox("BEZ velkého čela", value=get_val('bez_velkeho_cela', False))
                 vyklopne_celo = st.checkbox("Výklopné čelo", value=get_val('vyklopne_celo', False))
 
-        with st.expander("4. Koleje", expanded=False):
+        with st.expander("4. Koleje", expanded=True):
             c_k1, c_k2 = st.columns(2)
             with c_k1:
                 pochozi_koleje = st.checkbox("Pochozí koleje", value=get_val('pochozi_koleje', False))
@@ -566,7 +567,7 @@ if app_mode == "Kalkulátor":
                 ext_draha_m = st.number_input("Prodloužení dráhy (m)", 0.0, 20.0, get_val('ext_draha_m', 0.0), step=0.5)
                 podhori = st.checkbox("Zpevnění Podhoří", value=get_val('podhori', False))
 
-        with st.expander("5. Doprava a Montáž", expanded=False):
+        with st.expander("5. Doprava a Montáž", expanded=True):
             c_m1, c_m2 = st.columns(2)
             with c_m1: 
                 km = st.number_input("Km", 0, 5000, get_val('km', 0))
