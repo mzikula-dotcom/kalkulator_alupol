@@ -518,7 +518,6 @@ else:
         model = st.selectbox("Model", models_list, index=models_list.index(def_model) if def_model in models_list else 0)
         is_rock = (model.upper() == "ROCK")
         
-        # PŘEJMENOVÁNO: sirka -> sirka_mezi_kolejemi
         sirka = st.number_input("Šířka mezi kolejemi (mm)", 2000, 8000, get_val('sirka', 3500), step=10)
         moduly = st.slider("Počet modulů", 2, 7, get_val('moduly', 3))
         
@@ -533,7 +532,6 @@ else:
         def_barva = get_val('barva_typ', barvy_opts[0])
         barva_typ = st.selectbox("Barva konstrukce", barvy_opts, index=barvy_opts.index(def_barva) if def_barva in barvy_opts else 0)
         
-        # NOVÉ: RAL Input
         ral_kod = ""
         if "RAL" in barva_typ:
             ral_kod = st.text_input("Číslo RAL (např. 7016)", value=get_val('ral_kod', ""))
@@ -551,7 +549,6 @@ else:
         st.markdown("---")
         st.header("3. Doplňky a Dveře")
         
-        # NOVÉ: Detailní Dveře
         st.subheader("Dveře v čele (VČ)")
         pocet_dvere_vc = st.number_input("Ks VČ", 0, 2, get_val('pocet_dvere_vc', 0))
         if pocet_dvere_vc > 0:
@@ -564,12 +561,10 @@ else:
              dvere_bok_umisteni = st.selectbox("Umístění", ["Vlevo", "Vpravo", "Oboustranně"])
 
         st.markdown("---")
-        # Původní doplňky + NOVÉ
         zamykaci_klika = st.checkbox("Zamykací klika", value=get_val('zamykaci_klika', False))
         uzamykani_segmentu = st.checkbox("Uzamykání segmentů", value=get_val('uzamykani_segmentu', False))
         klapka = st.checkbox("Větrací klapka", value=get_val('klapka', False))
         
-        # NOVÉ: Čela
         col_cela1, col_cela2 = st.columns(2)
         with col_cela1: bez_maleho_cela = st.checkbox("BEZ malého čela", value=get_val('bez_maleho_cela', False))
         with col_cela2: bez_velkeho_cela = st.checkbox("BEZ velkého čela", value=get_val('bez_velkeho_cela', False))
@@ -581,7 +576,6 @@ else:
         pochozi_koleje_zdarma = st.checkbox("➡️ Akce: Koleje ZDARMA", value=get_val('pochozi_koleje_zdarma', False))
         obousmerne_koleje = st.checkbox("Obousměrné koleje", value=get_val('obousmerne_koleje', False))
         
-        # NOVÉ: Barva kolejí
         barva_koleji = st.selectbox("Barva kolejí", ["Stříbrný Elox", "Bronz", "Antracit"], index=0)
         
         ext_draha_m = st.number_input("Prodloužení dráhy (m)", 0.0, 20.0, get_val('ext_draha_m', 0.0), step=0.5)
@@ -654,7 +648,7 @@ else:
             val = p_data['pct'] if p_data['pct'] > 0 else 0.15
             items.append({"pol": "Zpevnění Podhoří", "det": f"{val*100:.0f}%", "cen": base_price * val})
 
-        # Dveře a Doplňky
+        # Dveře
         doors = []
         p_vc = get_surcharge_db("Jednokřídlé dveře", is_rock)['fix'] or 5000
         p_bok = get_surcharge_db("boční vstup", is_rock)['fix'] or 7000
@@ -671,7 +665,6 @@ else:
             items.append({"pol": "Zamykací klika", "det": f"{pocet_dvere_vc + pocet_dvere_bok} ks", "cen": (pocet_dvere_vc + pocet_dvere_bok) * val})
             
         if uzamykani_segmentu:
-            # Příklad ceny - nutno doladit dle DB
             val = 1500 
             items.append({"pol": "Uzamykání segmentů", "det": "", "cen": val})
 
@@ -680,28 +673,26 @@ else:
             items.append({"pol": "Větrací klapka", "det": "", "cen": val})
             
         if vyklopne_celo:
-             # Příklad ceny - nutno doladit dle DB
             val = 5000
             items.append({"pol": "Výklopné čelo", "det": "", "cen": val})
 
+        # KOLEJE - OPRAVA LOGIKY
         if pochozi_koleje:
             m_rail = (celkova_delka / 1000.0) * 2
-            if pochozi_koleje_zdarma: items.append({"pol": "Pochozí koleje", "det": f"{m_rail:.1f} m (AKCE)", "cen": 0})
+            items.append({"pol": "Pochozí koleje", "det": f"{m_rail:.1f} m (Standard)", "cen": 0})
+
+        if obousmerne_koleje:
+            m_rail = (celkova_delka / 1000.0) * 2
+            if pochozi_koleje_zdarma:
+                items.append({"pol": "Obousměrné koleje", "det": "AKCE ZDARMA", "cen": 0})
             else:
                 val = get_surcharge_db("Pochozí kolejnice", is_rock)['fix'] or 330
-                items.append({"pol": "Pochozí koleje", "det": f"{m_rail:.1f} m", "cen": m_rail * val})
-                
-        if obousmerne_koleje:
-             # Obousměrné = 2x delší koleje
-            m_rail = (celkova_delka / 1000.0) * 2
-            val = get_surcharge_db("Pochozí kolejnice", is_rock)['fix'] or 330
-            items.append({"pol": "Obousměrné koleje (Příplatek)", "det": f"+{m_rail:.1f} m", "cen": m_rail * val})
+                items.append({"pol": "Obousměrné koleje (Příplatek)", "det": f"+{m_rail:.1f} m", "cen": m_rail * val})
 
         if ext_draha_m > 0:
             val = get_surcharge_db("Jeden metr koleje", is_rock)['fix'] or 220
             items.append({"pol": "Prodloužení dráhy", "det": f"+{ext_draha_m} m", "cen": ext_draha_m * val})
             
-        # Info o barvě kolejí (bez ceny, jen info)
         if barva_koleji:
              items.append({"pol": f"Barva kolejí: {barva_koleji}", "det": "", "cen": 0})
 
@@ -731,6 +722,7 @@ else:
         with col1:
             st.subheader("Rozpočet")
             st.dataframe(pd.DataFrame(items), hide_index=True, use_container_width=True)
+            st.caption(f"ℹ️ {model}: odskok šířky {MODEL_PARAMS.get(model, MODEL_PARAMS['DEFAULT'])['step_w']}mm")
         with col2:
             st.subheader("Celkem")
             st.metric("Bez DPH", f"{total_no_vat:,.0f} Kč")
