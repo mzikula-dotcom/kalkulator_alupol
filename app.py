@@ -13,19 +13,15 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy import func
 
 # --- VERZE APLIKACE ---
-APP_VERSION = "49.0 (Stabilní)"
+APP_VERSION = "50.0 (Database Driven)"
 
 # --- KONFIGURACE VÝROBY ---
 ROOF_OVERLAP_MM = 100 
 FACE_WASTE_COEF = 0.85 
-# Koeficient pro přepočet fyzické délky oblouků na "ceníkovou plochu" (Plocha_Typu)
-# Kalibrováno na Wave 3S (6233 / 15830 = 0.3937...)
-POLY_PRICING_FACTOR = 0.394 
 
-# --- CENÍK PRODLOUŽENÍ KOLEJÍ ---
-RAIL_EXTENSION_PRICES = {
-    2: 910, 3: 2730, 4: 5460, 5: 9100, 6: 13650, 7: 19106
-}
+# --- ZÁLOŽNÍ HODNOTY (POKUD NEJSOU V DB) ---
+DEFAULT_POLY_FACTOR = 0.394
+DEFAULT_RAIL_PRICES = {2: 910, 3: 2730, 4: 5460, 5: 9100, 6: 13650, 7: 19106}
 
 # --- DEFINICE MODELŮ A OBRÁZKŮ ---
 MODEL_PARAMS = {
@@ -165,35 +161,60 @@ def get_surcharge_db(search_term, is_rock=False):
         if not item and is_rock: 
              item = session.query(Priplatek).filter(Priplatek.kategorie == "Standard", Priplatek.nazev.ilike(f"%{search_term}%")).first()
         if item:
-            # BEZPEČNOSTNÍ POJISTKA: or 0 (aby to nevrátilo None)
             return {"fix": item.cena_fix or 0, "pct": item.cena_pct or 0}
         return {"fix": 0, "pct": 0}
     finally:
         session.close()
+
+def get_rail_price_from_db(modules):
+    if not SessionLocal: return DEFAULT_RAIL_PRICES.get(modules, 0)
+    session = SessionLocal()
+    try:
+        search_name = f"Koleje prodloužení {modules} mod"
+        item = session.query(Priplatek).filter(Priplatek.nazev.ilike(f"%{search_name}%")).first()
+        if item and item.cena_fix > 0: return item.cena_fix
+        else: return DEFAULT_RAIL_PRICES.get(modules, 0)
+    finally: session.close()
+
+def get_poly_factor_from_db():
+    if not SessionLocal: return DEFAULT_POLY_FACTOR
+    session = SessionLocal()
+    try:
+        item = session.query(Priplatek).filter(Priplatek.nazev.ilike("Koeficient plochy")).first()
+        if item and item.cena_fix > 0: return item.cena_fix
+        else: return DEFAULT_POLY_FACTOR
+    finally: session.close()
 
 def calculate_base_price_db(model, width_mm, modules):
     if not SessionLocal: return 0,0, "DB Error"
     session = SessionLocal()
     try:
         count = session.query(Cenik).filter(Cenik.model == model).count()
-        if count == 0: 
-            return 0, 0, f"Ceník pro {model} je prázdný!"
-        row = session.query(Cenik).filter(
-            Cenik.model == model,
-            Cenik.moduly == modules,
-            Cenik.sirka_mm >= width_mm
-        ).order_by(Cenik.sirka_mm.asc()).first()
-        if row:
-            return row.cena, row.vyska * 1000, None
+        if count == 0: return 0, 0, f"Ceník pro {model} je prázdný!"
+        row = session.query(Cenik).filter(Cenik.model == model, Cenik.moduly == modules, Cenik.sirka_mm >= width_mm).order_by(Cenik.sirka_mm.asc()).first()
+        if row: return row.cena, row.vyska * 1000, None
         else:
             max_row = session.query(Cenik).filter(Cenik.model == model, Cenik.moduly == modules).order_by(Cenik.sirka_mm.desc()).first()
-            if max_row:
-                return 0, 0, f"Mimo rozsah (Max pro {model} je {max_row.sirka_mm} mm)"
+            if max_row: return 0, 0, f"Mimo rozsah (Max pro {model} je {max_row.sirka_mm} mm)"
             return 0, 0, "Rozměr nebo počet modulů nenalezen"
-    except Exception as e:
-        return 0,0, str(e)
-    finally:
-        session.close()
+    except Exception as e: return 0,0, str(e)
+    finally: session.close()
+
+def calculate_extension_price_final(model, width_mm, modules):
+    if not SessionLocal: return 0
+    session = SessionLocal()
+    try:
+        row_curr = session.query(Cenik).filter(Cenik.model == model, Cenik.moduly == modules, Cenik.sirka_mm >= width_mm).order_by(Cenik.sirka_mm.asc()).first()
+        row_next = session.query(Cenik).filter(Cenik.model == model, Cenik.moduly == modules + 1, Cenik.sirka_mm >= width_mm).order_by(Cenik.sirka_mm.asc()).first()
+        mod_len = 2110.0
+        structure_part = 0
+        if row_curr and row_next: structure_part = row_next.cena - row_curr.cena
+        else:
+            row_prev = session.query(Cenik).filter(Cenik.model == model, Cenik.moduly == modules - 1, Cenik.sirka_mm >= width_mm).order_by(Cenik.sirka_mm.asc()).first()
+            if row_curr and row_prev: structure_part = row_curr.cena - row_prev.cena
+        rail_part = get_rail_price_from_db(modules)
+        return (structure_part + rail_part) / (mod_len / 1000.0)
+    finally: session.close()
 
 def save_offer_to_db(data_dict, total_price):
     if not SessionLocal: return False, "DB Error"
@@ -204,18 +225,14 @@ def save_offer_to_db(data_dict, total_price):
         session.add(nova_nabidka)
         session.commit()
         return True, "Uloženo."
-    except Exception as e:
-        return False, str(e)
-    finally:
-        session.close()
+    except Exception as e: return False, str(e)
+    finally: session.close()
 
 def get_all_offers():
     if not SessionLocal: return []
     session = SessionLocal()
-    try:
-        return session.query(Nabidka).order_by(Nabidka.datum_vytvoreni.desc()).all()
-    finally:
-        session.close()
+    try: return session.query(Nabidka).order_by(Nabidka.datum_vytvoreni.desc()).all()
+    finally: session.close()
 
 def delete_offer(offer_id):
     if not SessionLocal: return
@@ -225,21 +242,18 @@ def delete_offer(offer_id):
         if offer:
             session.delete(offer)
             session.commit()
-    finally:
-        session.close()
+    finally: session.close()
 
 def img_to_base64(img_path):
     current_dir = os.path.dirname(os.path.abspath(__file__))
     full_path = os.path.join(current_dir, img_path)
     if os.path.exists(full_path):
-        with open(full_path, "rb") as img_file:
-            return base64.b64encode(img_file.read()).decode('utf-8')
+        with open(full_path, "rb") as img_file: return base64.b64encode(img_file.read()).decode('utf-8')
     files = os.listdir(current_dir)
     for f in files:
         if f.lower() == img_path.lower():
             full_path = os.path.join(current_dir, f)
-            with open(full_path, "rb") as img_file:
-                return base64.b64encode(img_file.read()).decode('utf-8')
+            with open(full_path, "rb") as img_file: return base64.b64encode(img_file.read()).decode('utf-8')
     return None
 
 def generate_pdf_html(zak_udaje, items, totals, model_name):
@@ -378,8 +392,7 @@ def generate_pdf_html(zak_udaje, items, totals, model_name):
         pdf_bytes = page.pdf(format="A4", print_background=True, margin={"top": "0cm", "right": "0cm", "bottom": "0cm", "left": "0cm"})
         browser.close()
     return pdf_bytes
-
-st.sidebar.title("Navigace")
+    st.sidebar.title("Navigace")
 page_mode = st.sidebar.radio("Režim:", ["Kalkulátor", "Historie Nabídek"])
 
 # --- ADMIN ---
@@ -604,27 +617,24 @@ else:
         avg_mod_len = int(celkova_delka / moduly)
         items.append({"pol": f"Zastřešení {model}", "det": f"{moduly} seg., Š: {sirka}mm ({avg_mod_len} mm/mod)", "cen": base_price})
         
-        # PRODLOUŽENÍ (VÝPOČET 49.0 - REPLIKACE EXCEL LOGIKY)
+        # PRODLOUŽENÍ (VÝPOČET 50.0 - DATABASE DRIVEN)
         roof_a, face_a_large, face_a_small, total_arc_len_mm = calculate_complex_geometry(model, sirka, height, moduly, celkova_delka)
         
         if diff_len > 10:
-            # 1. FIX: Počet modulů * 3000
             p_fix_mod = get_surcharge_db("Prodloužení modulu", is_rock)
             fix_price = p_fix_mod['fix'] if p_fix_mod['fix'] > 0 else 3000
             total_fix = pocet_prod_modulu * fix_price
             
-            # 2. VAR: (Celková délka oblouků * Faktor) * Prodloužení (m) * 2000
             p_var_mat = get_surcharge_db("Prodloužení modulu za metr", is_rock)
             mat_price_unit = p_var_mat['fix'] if p_var_mat['fix'] > 0 else 2000
             
-            # Vzorec: (Celková délka oblouků * POLY_PRICING_FACTOR) * (Prodloužení v metrech) * Cena za m2
-            total_var = (total_arc_len_mm * POLY_PRICING_FACTOR) * (diff_len / 1000000.0) * mat_price_unit
-            
+            factor_val = get_poly_factor_from_db()
+            total_var = (total_arc_len_mm * factor_val) * (diff_len / 1000000.0) * mat_price_unit
             total_extension_cost = total_fix + total_var
             
             items.append({
                 "pol": f"Prodloužení {pocet_prod_modulu} modulů (Atyp)", 
-                "det": f"Celkem +{diff_len} mm", 
+                "det": f"Celkem +{diff_len} mm (Fix {total_fix:,.0f} + Mat {total_var:,.0f})", 
                 "cen": total_extension_cost
             })
 
@@ -651,9 +661,8 @@ else:
             items.append({"pol": "Příplatek Antracit", "det": f"{val*100:.0f}%", "cen": base_price * val})
 
         p_data = get_surcharge_db("Plný polykarbonát", is_rock)
-        # BEZPEČNOSTNÍ KONTROLA HODNOTY Z DB
         val_db = p_data['fix'] or 0
-        poly_p = val_db if val_db > 10 else 2000 # Default 2000 pokud není v DB
+        poly_p = val_db if val_db > 10 else 2000 # Default 2000
         
         if poly_strecha: items.append({"pol": "Plný poly (Střecha)", "det": f"{roof_a:.1f} m²", "cen": roof_a * poly_p})
         if poly_celo_male and not bez_maleho_cela: items.append({"pol": "Plný poly (Malé čelo)", "det": f"{face_a_small:.1f} m²", "cen": face_a_small * poly_p})
@@ -745,4 +754,34 @@ else:
         with col2:
             st.subheader("Celkem")
             st.metric("Bez DPH", f"{total_no_vat:,.0f} Kč")
-            st.metric(f
+            st.metric(f"S DPH ({dph_sazba}%)", f"{total_with_vat:,.0f} Kč")
+            
+            c_a1, c_a2 = st.columns(2)
+            with c_a1:
+                if zak_jmeno:
+                    zak_udaje = {'jmeno': zak_jmeno, 'adresa': zak_adresa, 'tel': zak_tel, 'email': zak_email, 'vypracoval': vypracoval, 'datum': datum_vystaveni.strftime("%d.%m.%Y"), 'platnost': platnost_do.strftime("%d.%m.%Y"), 'termin': termin_dodani}
+                    totals = {'bez_dph': total_no_vat, 'dph': dph_val, 's_dph': total_with_vat, 'sazba_dph': dph_sazba}
+                    pdf_data = generate_pdf_html(zak_udaje, items, totals, model)
+                    st.download_button("📄 PDF Nabídka", data=pdf_data, file_name=f"Nabidka_{zak_jmeno}.pdf", mime="application/pdf", type="primary")
+            with c_a2:
+                if zak_jmeno:
+                    if st.button("💾 Uložit do systému"):
+                        save_data = {
+                            'zak_jmeno': zak_jmeno, 'zak_adresa': zak_adresa, 'zak_tel': zak_tel, 'zak_email': zak_email,
+                            'vypracoval': vypracoval, 'platnost_dny': platnost_dny, 'termin_dodani': termin_dodani,
+                            'model': model, 'sirka': sirka, 'moduly': moduly, 'celkova_delka': celkova_delka,
+                            'barva_typ': barva_typ, 'ral_kod': ral_kod,
+                            'poly_strecha': poly_strecha, 'poly_celo_male': poly_celo_male, 'poly_celo_velke': poly_celo_velke,
+                            'change_color_poly': change_color_poly,
+                            'pocet_dvere_vc': pocet_dvere_vc, 'pocet_dvere_bok': pocet_dvere_bok,
+                            'zamykaci_klika': zamykaci_klika, 'klapka': klapka, 
+                            'pochozi_koleje': pochozi_koleje, 'pochozi_koleje_zdarma': pochozi_koleje_zdarma,
+                            'ext_draha_m': ext_draha_m, 'podhori': podhori, 'km': km, 'cena_za_km': cena_za_km, 
+                            'montaz': montaz, 'sleva_pct': sleva_pct, 'dph_sazba': dph_sazba,
+                            'barva_koleji': barva_koleji, 'uzamykani_segmentu': uzamykani_segmentu,
+                            'obousmerne_koleje': obousmerne_koleje, 'bez_maleho_cela': bez_maleho_cela, 'bez_velkeho_cela': bez_velkeho_cela,
+                            'pocet_prod_modulu': pocet_prod_modulu
+                        }
+                        success, msg = save_offer_to_db(save_data, total_with_vat)
+                        if success: st.success("Uloženo!")
+                        else: st.error(msg)
