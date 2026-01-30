@@ -13,19 +13,14 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy import func
 
 # --- VERZE APLIKACE ---
-APP_VERSION = "46.0"
+APP_VERSION = "48.0"
 
 # --- KONFIGURACE VÝROBY ---
 ROOF_OVERLAP_MM = 100 
 FACE_WASTE_COEF = 0.85 
-# Koeficient pro přepočet skutečné plochy polykarbonátu na "ceníkovou plochu" Excelu
-# Excel používá cca 6.2 m2 pro Wave 3s, realita je cca 16.5 m2. Poměr = 0.378 -> 0.38
-POLY_PRICING_FACTOR = 0.38 
-
-# --- CENÍK PRODLOUŽENÍ KOLEJÍ ---
-RAIL_EXTENSION_PRICES = {
-    2: 910, 3: 2730, 4: 5460, 5: 9100, 6: 13650, 7: 19106
-}
+# Koeficient pro přepočet fyzické délky oblouků na "ceníkovou plochu" (Plocha_Typu)
+# Kalibrováno na Wave 3S (6233 / 15830 = 0.3937...)
+POLY_PRICING_FACTOR = 0.394 
 
 # --- DEFINICE MODELŮ A OBRÁZKŮ ---
 MODEL_PARAMS = {
@@ -144,17 +139,17 @@ def calculate_complex_geometry(model_name, width_input_mm, height_input_mm, modu
     sheet_len_m = (mod_len_mm + ROOF_OVERLAP_MM) / 1000.0
     
     total_roof_area = 0
-    total_arc_len_m = 0
+    total_arc_len_mm = 0 # Počítáme v MM pro přesnost s Excelem
     
     for i in range(modules):
         w_i = width_input_mm + (i * step_w)
         h_i = height_input_mm + (i * step_h)
-        _, arc_len_i = geometry_segment_area(w_i, h_i)
+        _, arc_len_i_m = geometry_segment_area(w_i, h_i)
         
-        total_roof_area += (arc_len_i * sheet_len_m)
-        total_arc_len_m += arc_len_i 
+        total_roof_area += (arc_len_i_m * sheet_len_m)
+        total_arc_len_mm += (arc_len_i_m * 1000)
         
-    return total_roof_area, area_face_large, area_face_small, total_arc_len_m
+    return total_roof_area, area_face_large, area_face_small, total_arc_len_mm
 
 def get_surcharge_db(search_term, is_rock=False):
     if not SessionLocal: return {"fix": 0, "pct": 0}
@@ -603,27 +598,30 @@ else:
         avg_mod_len = int(celkova_delka / moduly)
         items.append({"pol": f"Zastřešení {model}", "det": f"{moduly} seg., Š: {sirka}mm ({avg_mod_len} mm/mod)", "cen": base_price})
         
-        # PRODLOUŽENÍ (VÝPOČET 46.0 - S KOREKCÍ PLOCHY)
-        roof_a, face_a_large, face_a_small, total_arc_len_m = calculate_complex_geometry(model, sirka, height, moduly, celkova_delka)
+        # PRODLOUŽENÍ (VÝPOČET 48.0 - PŘESNÁ REPLIKACE EXCELU)
+        roof_a, face_a_large, face_a_small, total_arc_len_mm = calculate_complex_geometry(model, sirka, height, moduly, celkova_delka)
         
         if diff_len > 10:
-            # 1. FIX: Počet modulů * 3000
+            # 1. FIX: Počet modulů * 3000 (Z DB "Prodloužení modulu")
             p_fix_mod = get_surcharge_db("Prodloužení modulu", is_rock)
             fix_price = p_fix_mod['fix'] if p_fix_mod['fix'] > 0 else 3000
             total_fix = pocet_prod_modulu * fix_price
             
-            # 2. VAR: (Celková délka oblouků * Faktor) * Prodloužení (m) * 2000
+            # 2. VAR: (Celková délka oblouků * Faktor) * Prodloužení (m) * 2000 (Z DB "Prodloužení modulu za metr")
             p_var_mat = get_surcharge_db("Prodloužení modulu za metr", is_rock)
             mat_price_unit = p_var_mat['fix'] if p_var_mat['fix'] > 0 else 2000
             
-            # Vzorec: (Celková délka oblouků * POLY_PRICING_FACTOR) * (Prodloužení v metrech) * Cena za m2
-            total_var = (total_arc_len_m * POLY_PRICING_FACTOR) * (diff_len / 1000.0) * mat_price_unit
+            # Plocha typu = Celková délka oblouků v mm * Koeficient
+            # Vzorec uživatele: Plocha_Typu * (Rozdíl_mm / 1000000) * Cena
+            
+            plocha_typu = total_arc_len_mm * POLY_PRICING_FACTOR
+            total_var = plocha_typu * (diff_len / 1000000.0) * mat_price_unit
             
             total_extension_cost = total_fix + total_var
             
             items.append({
                 "pol": f"Prodloužení {pocet_prod_modulu} modulů (Atyp)", 
-                "det": f"Celkem +{diff_len} mm", 
+                "det": f"Celkem +{diff_len} mm (Fix {total_fix:,.0f} + Mat {total_var:,.0f})", 
                 "cen": total_extension_cost
             })
 
@@ -649,9 +647,6 @@ else:
             val = p_data['pct'] if p_data['pct'] > 0 else 0.05
             items.append({"pol": "Příplatek Antracit", "det": f"{val*100:.0f}%", "cen": base_price * val})
 
-        p_data = get_surcharge_db("Plný polykarbonát", is_rock)
-        poly_p = p_data['fix'] if p_data['fix'] > 10 else 1000
-        
         if poly_strecha: items.append({"pol": "Plný poly (Střecha)", "det": f"{roof_a:.1f} m²", "cen": roof_a * poly_p})
         if poly_celo_male and not bez_maleho_cela: items.append({"pol": "Plný poly (Malé čelo)", "det": f"{face_a_small:.1f} m²", "cen": face_a_small * poly_p})
         if poly_celo_velke and not bez_velkeho_cela: items.append({"pol": "Plný poly (Velké čelo)", "det": f"{face_a_large:.1f} m²", "cen": face_a_large * poly_p})
