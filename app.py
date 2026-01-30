@@ -32,7 +32,6 @@ MODEL_PARAMS = {
     "DEFAULT":  {"step_w": 100, "step_h": 50, "img": None}
 }
 
-# Standardní délky (dle Excelu)
 STD_LENGTHS = {
     2: 4336,
     3: 6446,
@@ -48,10 +47,6 @@ except ImportError:
     st.error("Chybí knihovna Playwright.")
 
 st.set_page_config(page_title="Kalkulátor Rentmil", layout="wide", page_icon="🏊‍♂️")
-
-# ########################################
-# 1. DATABÁZE
-# ########################################
 
 if 'form_data' not in st.session_state:
     st.session_state['form_data'] = {}
@@ -106,9 +101,6 @@ def parse_value_clean(val):
     try: return float(s.replace(',', '.'))
     except: return 0
 
-# ########################################
-# 2. GEOMETRIE
-# ########################################
 def geometry_segment_area(width_mm, height_mm):
     if width_mm <= 0: return 0, 0
     if height_mm <= 0: height_mm = 1
@@ -154,22 +146,17 @@ def calculate_complex_geometry(model_name, width_input_mm, height_input_mm, modu
         
     return total_roof_area, area_face_large, area_face_small
 
-# ########################################
-# 3. LOGIKA A DB
-# ########################################
-
 def get_surcharge_db(search_term, is_rock=False):
-    if not SessionLocal: return {"fix": 0, "pct": 0, "name": ""}
+    if not SessionLocal: return {"fix": 0, "pct": 0}
     session = SessionLocal()
     cat = "Rock" if is_rock else "Standard"
     try:
-        # Hledáme položku, která OBSAHUJE hledaný termín (ilike %term%)
         item = session.query(Priplatek).filter(Priplatek.kategorie == cat, Priplatek.nazev.ilike(f"%{search_term}%")).first()
         if not item and is_rock: 
              item = session.query(Priplatek).filter(Priplatek.kategorie == "Standard", Priplatek.nazev.ilike(f"%{search_term}%")).first()
         if item:
-            return {"fix": item.cena_fix, "pct": item.cena_pct, "name": item.nazev}
-        return {"fix": 0, "pct": 0, "name": "Nenalezeno"}
+            return {"fix": item.cena_fix, "pct": item.cena_pct}
+        return {"fix": 0, "pct": 0}
     finally:
         session.close()
 
@@ -194,6 +181,28 @@ def calculate_base_price_db(model, width_mm, modules):
             return 0, 0, "Rozměr nebo počet modulů nenalezen"
     except Exception as e:
         return 0,0, str(e)
+    finally:
+        session.close()
+
+def calculate_extension_price_dynamic(model, width_mm, modules):
+    if not SessionLocal: return 0
+    session = SessionLocal()
+    try:
+        row_curr = session.query(Cenik).filter(Cenik.model == model, Cenik.moduly == modules, Cenik.sirka_mm >= width_mm).order_by(Cenik.sirka_mm.asc()).first()
+        row_next = session.query(Cenik).filter(Cenik.model == model, Cenik.moduly == modules + 1, Cenik.sirka_mm >= width_mm).order_by(Cenik.sirka_mm.asc()).first()
+        
+        if row_curr and row_next:
+            price_diff = row_next.cena - row_curr.cena
+            mod_len = 2150.0 
+            price_per_meter = price_diff / (mod_len / 1000.0)
+            return price_per_meter
+        else:
+            row_prev = session.query(Cenik).filter(Cenik.model == model, Cenik.moduly == modules - 1, Cenik.sirka_mm >= width_mm).order_by(Cenik.sirka_mm.asc()).first()
+            if row_curr and row_prev:
+                price_diff = row_curr.cena - row_prev.cena
+                price_per_meter = price_diff / (2150.0 / 1000.0)
+                return price_per_meter
+            return 5000
     finally:
         session.close()
 
@@ -230,9 +239,6 @@ def delete_offer(offer_id):
     finally:
         session.close()
 
-# ########################################
-# 4. PDF GENERATOR
-# ########################################
 def img_to_base64(img_path):
     current_dir = os.path.dirname(os.path.abspath(__file__))
     full_path = os.path.join(current_dir, img_path)
@@ -384,9 +390,6 @@ def generate_pdf_html(zak_udaje, items, totals, model_name):
         browser.close()
     return pdf_bytes
 
-# ########################################
-# 5. UI
-# ########################################
 st.sidebar.title("Navigace")
 page_mode = st.sidebar.radio("Režim:", ["Kalkulátor", "Historie Nabídek"])
 
@@ -491,7 +494,6 @@ if page_mode == "Historie Nabídek":
                     st.rerun()
 
 else:
-    # --- UI KALKULÁTOR ---
     st.title("🛠 Konfigurátor Zastřešení")
     def get_val(key, default):
         if 'form_data' in st.session_state and key in st.session_state['form_data']: return st.session_state['form_data'][key]
@@ -530,11 +532,14 @@ else:
         sirka = st.number_input("Šířka mezi kolejemi (mm)", 2000, 8000, get_val('sirka', 3500), step=10)
         moduly = st.slider("Počet modulů", 2, 7, get_val('moduly', 3))
         
-        # NOVÉ: Zobrazení standardní délky
         std_len = STD_LENGTHS.get(moduly, moduly * 2190)
         st.caption(f"Standardní délka pro {moduly} moduly: {std_len} mm")
         celkova_delka = st.number_input("Celková délka (mm)", 2000, 20000, get_val('celkova_delka', std_len), step=10)
         diff_len = celkova_delka - std_len
+        
+        pocet_prod_modulu = 1
+        if diff_len > 10:
+            pocet_prod_modulu = st.number_input("Počet prodloužených modulů", 1, moduly, get_val('pocet_prod_modulu', 1))
 
         st.markdown("---")
         st.header("2. Barvy a Polykarbonát")
@@ -610,26 +615,16 @@ else:
         avg_mod_len = int(celkova_delka / moduly)
         items.append({"pol": f"Zastřešení {model}", "det": f"{moduly} seg., Š: {sirka}mm ({avg_mod_len} mm/mod)", "cen": base_price})
         
-        # NOVÁ LOGIKA PRODLOUŽENÍ
         if diff_len > 10:
-            # 1. Hledáme "Prodloužení" (očekáváme cenu za bm)
-            p_prod = get_surcharge_db("Prodloužení", is_rock)
-            # 2. Hledáme "Atypická délka" (očekáváme fixní příplatek)
+            price_per_m = calculate_extension_price_dynamic(model, sirka, moduly)
             p_atyp = get_surcharge_db("Atypická délka", is_rock)
+            fix_cost_per_module = p_atyp['fix'] if p_atyp['fix'] > 0 else 1500
             
-            # Pokud v DB chybí fix, použijeme default 3000
-            fix_cost = p_atyp['fix'] if p_atyp['fix'] > 0 else 3000
-            
-            # Pokud v DB chybí cena za metr, použijeme default 2000
-            # Pozn: p_prod['fix'] by měla být cena za 1 bm
-            var_cost_per_m = p_prod['fix'] if p_prod['fix'] > 0 else 2000
-            
-            # Výpočet: (metry navíc * cena za metr) + fix
-            total_extension_cost = ((diff_len / 1000.0) * var_cost_per_m) + fix_cost
+            total_extension_cost = ((diff_len / 1000.0) * price_per_m) + (pocet_prod_modulu * fix_cost_per_module)
             
             items.append({
-                "pol": "Prodloužení zastřešení (Atyp)", 
-                "det": f"+{diff_len} mm ({fix_cost} fix + {var_cost_per_m}/m)", 
+                "pol": f"Prodloužení {pocet_prod_modulu} modulů (Atyp)", 
+                "det": f"Celkem +{diff_len} mm", 
                 "cen": total_extension_cost
             })
 
@@ -774,7 +769,8 @@ else:
                             'ext_draha_m': ext_draha_m, 'podhori': podhori, 'km': km, 'cena_za_km': cena_za_km, 
                             'montaz': montaz, 'sleva_pct': sleva_pct, 'dph_sazba': dph_sazba,
                             'barva_koleji': barva_koleji, 'uzamykani_segmentu': uzamykani_segmentu,
-                            'obousmerne_koleje': obousmerne_koleje, 'bez_maleho_cela': bez_maleho_cela, 'bez_velkeho_cela': bez_velkeho_cela
+                            'obousmerne_koleje': obousmerne_koleje, 'bez_maleho_cela': bez_maleho_cela, 'bez_velkeho_cela': bez_velkeho_cela,
+                            'pocet_prod_modulu': pocet_prod_modulu
                         }
                         success, msg = save_offer_to_db(save_data, total_with_vat)
                         if success: st.success("Uloženo!")
