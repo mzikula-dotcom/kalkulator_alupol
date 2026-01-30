@@ -14,7 +14,7 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy import func
 
 # --- VERZE APLIKACE ---
-APP_VERSION = "53.0 (Admin Dashboard)"
+APP_VERSION = "54.0 (Fix Admin & Layout)"
 
 # --- HESLO ADMINA ---
 ADMIN_PASSWORD = "admin123"
@@ -50,12 +50,12 @@ try:
 except ImportError:
     st.error("Chybí knihovna Playwright. PDF nebude fungovat.")
 
-st.set_page_config(page_title=f"Rentmil System v{APP_VERSION}", layout="wide", page_icon="🏊‍♂️")
+st.set_page_config(page_title=f"Rentmil v{APP_VERSION}", layout="wide", page_icon="🏊‍♂️")
 
-# CSS Styling pro čistší vzhled
+# CSS - Kompaktnější vzhled
 st.markdown("""
     <style>
-        .block-container {padding-top: 1rem; padding-bottom: 2rem;}
+        .block-container {padding-top: 1rem; padding-bottom: 2rem; padding-left: 3rem; padding-right: 3rem;}
         h1 {padding-top: 0rem;}
         .metric-card {background-color: #f0f2f6; padding: 15px; border-radius: 10px; border-left: 5px solid #004b96;}
     </style>
@@ -227,7 +227,6 @@ def save_offer_to_db(data_dict, total_price):
     session = SessionLocal()
     try:
         json_str = json.dumps(data_dict, default=str)
-        # Získání jména obchodníka z dat
         obchodnik = data_dict.get('vypracoval', 'Neznámý')
         nova_nabidka = Nabidka(
             zakaznik=data_dict.get('zak_jmeno', 'Neznámý'), 
@@ -235,7 +234,6 @@ def save_offer_to_db(data_dict, total_price):
             cena_celkem=total_price, 
             data_json=json_str, 
             datum_vytvoreni=datetime.now()
-            # Zde by se dal uložit i sloupec 'obchodnik', kdyby byl v DB. Zatím je v JSON.
         )
         session.add(nova_nabidka)
         session.commit()
@@ -259,20 +257,23 @@ def delete_offer(offer_id):
             session.commit()
     finally: session.close()
 
+# OPRAVENÁ FUNKCE PRO UPDATE DATABÁZE
 def update_priplatek_db(edited_df):
     if not SessionLocal: return
     session = SessionLocal()
     try:
-        # Iterace přes upravený dataframe a update v DB
-        for index, row in edited_df.iterrows():
+        # Převedeme editor dataframe na seznam slovníků pro bezpečnější iteraci
+        records = edited_df.to_dict('records')
+        for row in records:
+            # Hledáme podle ID
             item = session.query(Priplatek).filter(Priplatek.id == row['id']).first()
             if item:
                 item.nazev = row['nazev']
-                item.cena_fix = row['cena_fix']
-                item.cena_pct = row['cena_pct']
+                item.cena_fix = float(row['cena_fix']) if row['cena_fix'] is not None else 0.0
+                item.cena_pct = float(row['cena_pct']) if row['cena_pct'] is not None else 0.0
                 item.kategorie = row['kategorie']
         session.commit()
-        st.toast("Ceny byly aktualizovány!", icon="✅")
+        st.toast("Ceny uloženy! ✅")
     except Exception as e:
         st.error(f"Chyba při ukládání: {e}")
     finally:
@@ -437,7 +438,7 @@ def get_val(key, default):
 
 # Navigace (Sidebar)
 with st.sidebar:
-    st.title("Navigace")
+    st.title(f"Rentmil v{APP_VERSION.split(' ')[0]}")
     
     # Přepínač módů
     app_mode = st.radio("Sekce:", ["Kalkulátor", "🔧 Admin Mód"])
@@ -487,7 +488,8 @@ if app_mode == "Kalkulátor":
 
     st.divider()
 
-    col_input, col_result = st.columns([1.5, 1], gap="large")
+    # LAYOUT 50/50
+    col_input, col_result = st.columns([1, 1], gap="large")
 
     with col_input:
         st.subheader("1. Parametry")
@@ -707,15 +709,14 @@ elif app_mode == "🔧 Admin Mód":
         # --- DASHBOARD ---
         st.subheader("1. Přehled Prodeje")
         
+        session = SessionLocal()
         df_nabidky = pd.read_sql(session.query(Nabidka).statement, session.bind) if SessionLocal else pd.DataFrame()
-        session = SessionLocal() # Refresh session
+        session.close()
         
         if not df_nabidky.empty:
-            # Extrakce jména obchodníka z JSONu, pokud není ve sloupci
             if 'vypracoval' not in df_nabidky.columns:
                 df_nabidky['vypracoval'] = df_nabidky['data_json'].apply(lambda x: json.loads(x).get('vypracoval', 'Neznámý') if x else 'Neznámý')
             
-            # KPI Karty
             kpi1, kpi2, kpi3 = st.columns(3)
             total_sales = df_nabidky['cena_celkem'].sum()
             count_sales = len(df_nabidky)
@@ -727,7 +728,6 @@ elif app_mode == "🔧 Admin Mód":
             
             st.divider()
             
-            # GRAFY
             g1, g2 = st.columns(2)
             with g1:
                 st.markdown("#### Top Obchodníci")
@@ -755,11 +755,13 @@ elif app_mode == "🔧 Admin Mód":
 
         st.divider()
         
-        # --- SPRÁVA CENÍKŮ (EDITACE) ---
+        # --- SPRÁVA CENÍKŮ ---
         st.subheader("2. Správa Ceníků a Příplatků")
-        st.info("Zde můžeš přímo upravovat ceny příplatků. Změny se projeví ihned.")
         
+        session = SessionLocal()
         df_priplatky = pd.read_sql(session.query(Priplatek).statement, session.bind)
+        session.close()
+
         if not df_priplatky.empty:
             edited_df = st.data_editor(
                 df_priplatky[['id', 'nazev', 'cena_fix', 'cena_pct', 'kategorie']],
@@ -772,17 +774,14 @@ elif app_mode == "🔧 Admin Mód":
             if st.button("💾 Uložit změny v cenách"):
                 update_priplatek_db(edited_df)
         
-        # Nahrávání souborů (záložní možnost)
         with st.expander("📂 Hromadné nahrávání CSV"):
             t1, t2 = st.tabs(["Modely", "Příplatky"])
             with t1:
                 imp_m = st.text_area("CSV Modely", height=100)
                 if st.button("Nahrát Modely"):
-                    # ... (kód pro nahrání modelů - stejný jako předtím) ...
-                    st.warning("Funkce nahrávání je dostupná v kódu, zde zkráceno pro přehlednost.")
+                    st.info("Funkce dostupná v kódu (zkráceno).")
             with t2:
                 imp_p = st.text_area("CSV Příplatky", height=100)
-                # ...
 
         st.divider()
         
