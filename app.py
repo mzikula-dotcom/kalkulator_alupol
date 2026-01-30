@@ -16,6 +16,18 @@ from sqlalchemy import func
 ROOF_OVERLAP_MM = 100 
 FACE_WASTE_COEF = 0.85 
 
+# --- CENÍK PRODLOUŽENÍ KOLEJÍ (UNIVERZÁLNÍ) ---
+# Hodnoty z prvních řádků ceníku (Cena za prodloužení kolejí o délku jednoho modulu)
+# Klíč = počet modulů, Hodnota = Cena v Kč
+RAIL_EXTENSION_PRICES = {
+    2: 910,
+    3: 2730,
+    4: 5460,
+    5: 9100,
+    6: 13650,
+    7: 19106
+}
+
 # --- DEFINICE MODELŮ A OBRÁZKŮ ---
 MODEL_PARAMS = {
     "PRACTIC":  {"step_w": 100, "step_h": 50, "img": "practic.png"},
@@ -184,27 +196,39 @@ def calculate_base_price_db(model, width_mm, modules):
     finally:
         session.close()
 
-def calculate_extension_price_dynamic(model, width_mm, modules):
+# UNIVERZÁLNÍ VÝPOČET PRODLOUŽENÍ (Konstrukce + Koleje)
+def calculate_extension_price_dynamic_universal(model, width_mm, modules):
+    """
+    Vypočítá kompletní cenu za 1 metr prodloužení (Konstrukce + Koleje).
+    """
     if not SessionLocal: return 0
     session = SessionLocal()
     try:
+        # 1. Cena Konstrukce (rozdíl cen modulů)
         row_curr = session.query(Cenik).filter(Cenik.model == model, Cenik.moduly == modules, Cenik.sirka_mm >= width_mm).order_by(Cenik.sirka_mm.asc()).first()
         row_next = session.query(Cenik).filter(Cenik.model == model, Cenik.moduly == modules + 1, Cenik.sirka_mm >= width_mm).order_by(Cenik.sirka_mm.asc()).first()
         
-        # Standardní délka modulu (2110mm) - toto je délka materiálu, který se počítá dynamicky
+        # Standardní délka modulu
         mod_len = 2110.0 
         
+        structure_price_per_m = 0
         if row_curr and row_next:
             price_diff = row_next.cena - row_curr.cena
-            price_per_meter = price_diff / (mod_len / 1000.0)
-            return price_per_meter
+            structure_price_per_m = price_diff / (mod_len / 1000.0)
         else:
+            # Fallback
             row_prev = session.query(Cenik).filter(Cenik.model == model, Cenik.moduly == modules - 1, Cenik.sirka_mm >= width_mm).order_by(Cenik.sirka_mm.asc()).first()
             if row_curr and row_prev:
                 price_diff = row_curr.cena - row_prev.cena
-                price_per_meter = price_diff / (mod_len / 1000.0)
-                return price_per_meter
-            return 5000
+                structure_price_per_m = price_diff / (mod_len / 1000.0)
+        
+        # 2. Cena Kolejí (z univerzální tabulky RAIL_EXTENSION_PRICES)
+        rail_price_total = RAIL_EXTENSION_PRICES.get(modules, 0)
+        rail_price_per_m = rail_price_total / (mod_len / 1000.0)
+        
+        # Celková cena za metr
+        return structure_price_per_m + rail_price_per_m
+        
     finally:
         session.close()
 
@@ -618,12 +642,21 @@ else:
         items.append({"pol": f"Zastřešení {model}", "det": f"{moduly} seg., Š: {sirka}mm ({avg_mod_len} mm/mod)", "cen": base_price})
         
         if diff_len > 10:
-            price_per_m = calculate_extension_price_dynamic(model, sirka, moduly)
-            # Hledáme položku "Prodloužení modulu za metr", ale používáme ji jako fix za modul (logika Excelu)
-            p_fix_mod = get_surcharge_db("Prodloužení modulu za metr", is_rock)
-            fix_cost_per_module = p_fix_mod['fix'] if p_fix_mod['fix'] > 0 else 2000
+            # UNIVERZÁLNÍ LOGIKA (Cena konstrukce + Cena kolejí + Fix)
+            price_per_m_total = calculate_extension_price_dynamic_universal(model, sirka, moduly)
             
-            total_extension_cost = ((diff_len / 1000.0) * price_per_m) + (pocet_prod_modulu * fix_cost_per_module)
+            # Fixní poplatek (cca 5000)
+            # Můžeme použít buď hodnotu z DB nebo natvrdo 5000, pokud v DB chybí
+            p_fix_atyp = get_surcharge_db("Atypická délka", is_rock) # Zkusíme najít obecný Atyp fix
+            p_fix_mod = get_surcharge_db("Prodloužení modulu", is_rock) # Nebo prodloužení
+            
+            # Logika pro fix: 
+            # V Excelu to vychází na cca 3000 (fix) + 2000 (modul) * počet modulů? 
+            # Nebo spíš paušál 5000 celkem za celou úpravu? 
+            # Dle analýzy to vypadá na paušál 5000 Kč + cena materiálu.
+            fix_cost = 5000 
+            
+            total_extension_cost = ((diff_len / 1000.0) * price_per_m_total) + fix_cost
             
             items.append({
                 "pol": f"Prodloužení {pocet_prod_modulu} modulů (Atyp)", 
