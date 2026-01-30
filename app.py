@@ -18,14 +18,24 @@ FACE_WASTE_COEF = 0.85
 
 # --- DEFINICE MODELŮ A OBRÁZKŮ ---
 MODEL_PARAMS = {
-    "PRACTIC": {"step_w": 100, "step_h": 50, "img": "practic.png"},
-    "DREAM":   {"step_w": 130, "step_h": 65, "img": "dream.png"},
-    "HARMONY": {"step_w": 130, "step_h": 65, "img": "harmony.png"},
-    "ROCK":    {"step_w": 130, "step_h": 65, "img": "rock.png"},
-    "TERRACE": {"step_w": 71,  "step_h": 65, "img": "terrace.png"}, 
-    "HORIZONT":{"step_w": 130, "step_h": 65, "img": "horizont.png"}, 
-    "STAR":    {"step_w": 130, "step_h": 65, "img": "star.png"}, 
-    "DEFAULT": {"step_w": 100, "step_h": 50, "img": None}
+    # Standardní modely
+    "PRACTIC":  {"step_w": 100, "step_h": 50, "img": "practic.png"},
+    "DREAM":    {"step_w": 130, "step_h": 65, "img": "dream.png"},
+    "HARMONY":  {"step_w": 130, "step_h": 65, "img": "harmony.png"},
+    "ROCK":     {"step_w": 130, "step_h": 65, "img": "rock.png"},
+    "TERRACE":  {"step_w": 71,  "step_h": 65, "img": "terrace.png"}, 
+    "HORIZONT": {"step_w": 130, "step_h": 65, "img": "horizont.png"}, 
+    "STAR":     {"step_w": 130, "step_h": 65, "img": "star.png"},
+    
+    # Specifické modely (Dle Excelu mají Flash/Wave větší odskok)
+    "WAVE":     {"step_w": 146, "step_h": 70, "img": "wave.png"},
+    "FLASH":    {"step_w": 146, "step_h": 70, "img": "flash.png"},
+    
+    # Další modely
+    "WING":     {"step_w": 130, "step_h": 65, "img": "wing.png"},
+    "SUNSET":   {"step_w": 130, "step_h": 65, "img": "sunset.png"},
+    
+    "DEFAULT":  {"step_w": 100, "step_h": 50, "img": None}
 }
 
 STD_LENGTHS = {
@@ -173,7 +183,7 @@ def calculate_base_price_db(model, width_mm, modules):
     try:
         count = session.query(Cenik).filter(Cenik.model == model).count()
         if count == 0: 
-            if model == "PRACTIC": return 0,0, "Ceník je prázdný!"
+            return 0, 0, f"Ceník pro {model} je prázdný!"
         row = session.query(Cenik).filter(
             Cenik.model == model,
             Cenik.moduly == modules,
@@ -401,7 +411,8 @@ with st.sidebar.expander("🔐 Servisní zóna (Admin)"):
                     counter = 0
                     for idx, row in df_c.iterrows():
                         first_col = str(row[0]).strip()
-                        if first_col.upper() in ["PRACTIC", "HARMONY", "DREAM", "HORIZONT", "STAR", "ROCK", "TERRACE"]:
+                        # Zde kontrolujeme všechny známé modely
+                        if first_col.upper() in MODEL_PARAMS.keys():
                             current_model = first_col.upper()
                             continue
                         if current_model and first_col.startswith("do "):
@@ -513,8 +524,12 @@ else:
 
     with st.sidebar:
         st.header("1. Parametry")
+        # Automatické načtení modelů z definice
+        models_list = list(MODEL_PARAMS.keys())
+        if "DEFAULT" in models_list: models_list.remove("DEFAULT")
+        models_list.sort() # Seřadit abecedně
+        
         def_model = get_val('model', "PRACTIC")
-        models_list = ["PRACTIC", "HARMONY", "DREAM", "HORIZONT", "STAR", "ROCK", "TERRACE"]
         model = st.selectbox("Model", models_list, index=models_list.index(def_model) if def_model in models_list else 0)
         is_rock = (model.upper() == "ROCK")
         
@@ -611,7 +626,6 @@ else:
             val = p_data['fix'] if p_data['fix'] > 0 else 1500
             items.append({"pol": "Atypická délka (Zkrácení)", "det": f"{diff_len} mm", "cen": val})
 
-        # Barvy
         if "Stříbrný" in barva_typ:
             val = base_price * -0.10
             items.append({"pol": "BONUS: Stříbrný Elox", "det": "Sleva 10% ze základu", "cen": val})
@@ -629,7 +643,6 @@ else:
             val = p_data['pct'] if p_data['pct'] > 0 else 0.05
             items.append({"pol": "Příplatek Antracit", "det": f"{val*100:.0f}%", "cen": base_price * val})
 
-        # Geometrie
         roof_a, face_a_large, face_a_small = calculate_complex_geometry(model, sirka, height, moduly, celkova_delka)
         p_data = get_surcharge_db("Plný polykarbonát", is_rock)
         poly_p = p_data['fix'] if p_data['fix'] > 10 else 1000
@@ -648,7 +661,6 @@ else:
             val = p_data['pct'] if p_data['pct'] > 0 else 0.15
             items.append({"pol": "Zpevnění Podhoří", "det": f"{val*100:.0f}%", "cen": base_price * val})
 
-        # Dveře
         doors = []
         p_vc = get_surcharge_db("Jednokřídlé dveře", is_rock)['fix'] or 5000
         p_bok = get_surcharge_db("boční vstup", is_rock)['fix'] or 7000
@@ -676,7 +688,6 @@ else:
             val = 5000
             items.append({"pol": "Výklopné čelo", "det": "", "cen": val})
 
-        # KOLEJE - OPRAVA LOGIKY
         if pochozi_koleje:
             m_rail = (celkova_delka / 1000.0) * 2
             items.append({"pol": "Pochozí koleje", "det": f"{m_rail:.1f} m (Standard)", "cen": 0})
