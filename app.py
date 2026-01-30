@@ -12,6 +12,9 @@ from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, 
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy import func
 
+# --- KONFIGURACE VÝROBY ---
+POLY_OVERLAP_MM = 50 # Přesah polykarbonátu pro střechu (technologický přídavek)
+
 # --- DEFINICE MODELŮ A OBRÁZKŮ ---
 MODEL_PARAMS = {
     "PRACTIC": {"step_w": 100, "step_h": 50, "img": "practic.png"},
@@ -33,17 +36,15 @@ STD_LENGTHS = {
     7: 14886
 }
 
-# Zkusíme importovat Playwright
 try:
     from playwright.sync_api import sync_playwright
 except ImportError:
     st.error("Chybí knihovna Playwright.")
 
-# --- KONFIGURACE STRÁNKY ---
 st.set_page_config(page_title="Kalkulátor Rentmil", layout="wide", page_icon="🏊‍♂️")
 
 # ########################################
-# 1. DATABÁZE A MODELY
+# 1. DATABÁZE
 # ########################################
 
 if 'form_data' not in st.session_state:
@@ -92,9 +93,6 @@ if db_url:
     except Exception as e:
         st.error(f"Chyba DB: {e}")
 
-# ########################################
-# 2. POMOCNÉ FUNKCE
-# ########################################
 def parse_value_clean(val):
     if pd.isna(val) or str(val).strip() == "": return 0
     s = str(val).strip().replace(' ', '').replace('Kč', '').replace('Kc', '').replace('\xa0', '')
@@ -103,51 +101,78 @@ def parse_value_clean(val):
     except: return 0
 
 # ########################################
-# 3. GEOMETRIE
+# 2. GEOMETRIE (VÝROBNÍ LOGIKA)
 # ########################################
 def geometry_segment_area(width_mm, height_mm):
+    """
+    Vypočítá výrobní plochu (opsaný obdélník) a délku oblouku.
+    """
     if width_mm <= 0: return 0, 0
     if height_mm <= 0: height_mm = 1
+    
     s = width_mm
     v = height_mm
+    
+    # 1. Výpočet délky oblouku (pro střechu) - matematicky přesně
     try:
         R = ((s**2 / 4) + v**2) / (2 * v)
-        if R <= 0: return 0, 0
-        ratio = s / (2 * R)
-        if ratio > 1: ratio = 1
-        if ratio < -1: ratio = -1
-        alpha_rad = 2 * math.asin(ratio)
-        arc_len = alpha_rad * R
-        area = 0.5 * (R**2) * (alpha_rad - math.sin(alpha_rad))
-        return area / 1_000_000, arc_len / 1000
+        if R <= 0: 
+            arc_len = s # Fallback na tětivu
+        else:
+            ratio = s / (2 * R)
+            if ratio > 1: ratio = 1
+            if ratio < -1: ratio = -1
+            alpha_rad = 2 * math.asin(ratio)
+            arc_len = alpha_rad * R
     except:
-        return 0, 0
+        arc_len = s
+
+    # 2. Výpočet plochy pro cenu (pro čela) - VÝROBNÍ LOGIKA (Obdélník)
+    # Platí se celý obdélník, ze kterého se to vyřízne
+    production_area = (s * v) / 1_000_000 # m2
+    
+    return production_area, arc_len / 1000 # m2, m
 
 def calculate_complex_geometry(model_name, width_input_mm, height_input_mm, modules, total_length_mm):
+    """
+    Počítá plochy s použitím výrobních koeficientů a přesahů.
+    """
     params = MODEL_PARAMS.get(model_name.upper(), MODEL_PARAMS["DEFAULT"])
     step_w = params["step_w"]
     step_h = params["step_h"]
 
+    # --- ČELA ---
+    # Malé čelo (Nejmenší modul)
     w_small = width_input_mm
     h_small = height_input_mm
     area_face_small, arc_small = geometry_segment_area(w_small, h_small)
     
+    # Velké čelo (Největší modul)
     w_large = width_input_mm + ((modules - 1) * step_w)
     h_large = height_input_mm + ((modules - 1) * step_h)
     area_face_large, arc_large = geometry_segment_area(w_large, h_large)
     
-    mod_len_avg = total_length_mm / modules
+    # --- STŘECHA ---
+    # Průměrná délka modulu
+    mod_len_mm = total_length_mm / modules
+    
+    # Délka desky pro výrobu = délka modulu + přesah (50mm)
+    sheet_len_m = (mod_len_mm + POLY_OVERLAP_MM) / 1000.0
+    
     total_roof_area = 0
     for i in range(modules):
         w_i = width_input_mm + (i * step_w)
         h_i = height_input_mm + (i * step_h)
-        _, arc_i = geometry_segment_area(w_i, h_i)
-        total_roof_area += (arc_i * (mod_len_avg / 1000.0))
+        # Získáme délku oblouku pro tento modul
+        _, arc_len_i = geometry_segment_area(w_i, h_i)
+        
+        # Plocha desky = Délka oblouku * Délka desky (s přesahem)
+        total_roof_area += (arc_len_i * sheet_len_m)
         
     return total_roof_area, area_face_large, area_face_small
 
 # ########################################
-# 4. DB FUNKCE
+# 3. LOGIKA A DB
 # ########################################
 
 def get_surcharge_db(search_term, is_rock=False):
@@ -222,7 +247,7 @@ def delete_offer(offer_id):
         session.close()
 
 # ########################################
-# 5. PDF GENERATOR
+# 4. PDF
 # ########################################
 def img_to_base64(img_path):
     current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -254,40 +279,29 @@ def generate_pdf_html(zak_udaje, items, totals, model_name):
         <style>
             @page { margin: 2cm; size: A4; }
             body { font-family: 'Helvetica', 'Arial', sans-serif; color: #333; font-size: 14px; line-height: 1.4; }
-            
-            /* HLAVIČKA */
             .header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 20px; }
-            .logo { max-width: 180px; height: auto; } /* Zmenšeno o 25% (původně 250px) */
-            
+            .logo { max-width: 180px; height: auto; }
             .right-header { text-align: center; display: flex; flex-direction: column; align-items: center; }
             .mnich { max-width: 100px; height: auto; margin-bottom: 5px; }
             .slogan { font-size: 12px; font-weight: bold; color: #555; font-style: italic; }
-
             .title { text-align: center; color: #004b96; font-size: 28px; font-weight: bold; margin-top: 10px; margin-bottom: 10px; }
             .divider { border-bottom: 3px solid #f07800; margin-bottom: 30px; }
-            
             .info-grid { display: flex; justify-content: space-between; margin-bottom: 30px; }
             .col { width: 48%; }
             .col-header { color: #004b96; font-weight: bold; font-size: 16px; margin-bottom: 5px; border-bottom: 1px solid #ddd; padding-bottom: 5px; }
             .info-text { margin: 2px 0; }
-            
-            /* ZÓNA OBRÁZKU */
             .model-section { text-align: center; margin: 30px 0; }
             .model-intro { font-size: 14px; color: #333; margin-bottom: 5px; }
             .model-name-highlight { font-size: 22px; font-weight: bold; color: #004b96; text-transform: uppercase; margin-bottom: 15px; display: block; }
-            .model-img { max-width: 60%; height: auto; border-radius: 5px; } /* Zmenšeno o 20% (původně 80%) */
-
-            /* TABULKA */
+            .model-img { max-width: 60%; height: auto; border-radius: 5px; }
             .items-table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
             .items-table th { background-color: #004b96; color: white; padding: 10px; text-align: left; }
             .items-table td { padding: 10px; border-bottom: 1px solid #eee; }
             .items-table tr:nth-child(even) { background-color: #f9f9f9; }
             .price-col { text-align: right; white-space: nowrap; }
-            
             .totals { float: right; width: 40%; text-align: right; }
             .total-row { display: flex; justify-content: space-between; margin: 5px 0; }
             .grand-total { font-size: 24px; color: #f07800; font-weight: bold; margin-top: 10px; border-top: 2px solid #f07800; padding-top: 5px; }
-            
             .footer { clear: both; margin-top: 50px; padding-top: 20px; border-top: 1px solid #004b96; font-size: 12px; color: #666; text-align: center; }
             .note { background-color: #e6f2ff; padding: 15px; border-left: 5px solid #004b96; margin-top: 20px; margin-bottom: 20px; font-style: italic; }
         </style>
@@ -300,10 +314,8 @@ def generate_pdf_html(zak_udaje, items, totals, model_name):
                 <div class="slogan">Zastřešení v klidu</div>
             </div>
         </div>
-        
         <div class="title">CENOVÁ NABÍDKA</div>
         <div class="divider"></div>
-        
         <div class="info-grid">
             <div class="col">
                 <div class="col-header">DODAVATEL</div>
@@ -327,7 +339,6 @@ def generate_pdf_html(zak_udaje, items, totals, model_name):
                 <div class="info-text">Platnost do: <strong>{{ data.platnost }}</strong></div>
             </div>
         </div>
-
         {% if model_img_b64 %}
         <div class="model-section">
             <div class="model-intro">Připravili jsme pro vás nabídku zastřešení:</div>
@@ -335,7 +346,6 @@ def generate_pdf_html(zak_udaje, items, totals, model_name):
             <img src="data:image/png;base64,{{ model_img_b64 }}" class="model-img">
         </div>
         {% endif %}
-
         <table class="items-table">
             <thead>
                 <tr>
@@ -354,7 +364,6 @@ def generate_pdf_html(zak_udaje, items, totals, model_name):
                 {% endfor %}
             </tbody>
         </table>
-        
         <div class="totals">
             <div class="total-row">
                 <span>Cena bez DPH:</span>
@@ -393,7 +402,7 @@ def generate_pdf_html(zak_udaje, items, totals, model_name):
     return pdf_bytes
 
 # ########################################
-# 6. UI (STREAMLIT)
+# 5. UI (STREAMLIT)
 # ########################################
 st.sidebar.title("Navigace")
 page_mode = st.sidebar.radio("Režim:", ["Kalkulátor", "Historie Nabídek"])
@@ -401,7 +410,6 @@ page_mode = st.sidebar.radio("Režim:", ["Kalkulátor", "Historie Nabídek"])
 # --- SERVISNÍ ZÓNA ---
 with st.sidebar.expander("🔐 Servisní zóna (Admin)"):
     tab_modely, tab_priplatky = st.tabs(["🏠 Ceníky Modelů", "➕ Příplatky"])
-    
     with tab_modely:
         st.caption("Formát: 'Model;...\\n do 3m;...'")
         import_data_models = st.text_area("CSV Modely", height=150, key="imp_models")
@@ -456,25 +464,20 @@ with st.sidebar.expander("🔐 Servisní zóna (Admin)"):
                     for _, row in df_p.iterrows():
                         nazev = str(row[0]).strip()
                         if not nazev or pd.isna(nazev): continue
-                        
                         val_std = row[1]
                         val_std_clean = parse_value_clean(val_std)
                         is_pct_std = isinstance(val_std, str) and '%' in val_std
-                        
                         p_std = Priplatek(nazev=nazev, cena_pct=val_std_clean if is_pct_std else 0, cena_fix=val_std_clean if not is_pct_std else 0, kategorie="Standard")
                         session.add(p_std)
                         counter += 1
-
                         if len(row) > 2:
                             val_rock = row[2]
                             if pd.isna(val_rock) or str(val_rock).strip() == "": val_rock = val_std
                             val_rock_clean = parse_value_clean(val_rock)
                             is_pct_rock = isinstance(val_rock, str) and '%' in val_rock
-                            
                             p_rock = Priplatek(nazev=nazev, cena_pct=val_rock_clean if is_pct_rock else 0, cena_fix=val_rock_clean if not is_pct_rock else 0, kategorie="Rock")
                             session.add(p_rock)
                             counter += 1
-                    
                     session.commit()
                     st.success(f"Nahráno {counter} položek příplatků.")
                 except Exception as e:
@@ -555,7 +558,6 @@ else:
         sirka = st.number_input("Šířka (mm)", 2000, 8000, get_val('sirka', 3500), step=10)
         moduly = st.slider("Počet modulů", 2, 7, get_val('moduly', 3))
         
-        # --- DÉLKA Z TABULKY ---
         std_len = STD_LENGTHS.get(moduly, moduly * 2190)
         st.caption(f"Standardní délka pro {moduly} moduly: {std_len} mm")
         celkova_delka = st.number_input("Celková délka (mm)", 2000, 20000, get_val('celkova_delka', std_len), step=10)
@@ -613,10 +615,8 @@ else:
         if diff_len > 10:
             p_data = get_surcharge_db("Prodloužení modulu", is_rock)
             p_meter_data = get_surcharge_db("za metr", is_rock)
-            
             fix_prod = p_data['fix'] if p_data['fix'] > 0 else 3000
             per_m = p_meter_data['fix'] if p_meter_data['fix'] > 0 else 2000
-            
             price_len = (diff_len / 1000.0) * per_m
             cost = fix_prod + price_len
             items.append({"pol": "Atypická délka (Prodloužení)", "det": f"+{diff_len} mm", "cen": cost})
@@ -646,13 +646,12 @@ else:
             c = base_price * val
             items.append({"pol": "Příplatek Antracit", "det": f"{val*100:.0f}%", "cen": c})
 
-        # GEOMETRIE A POLY (S modelem)
+        # GEOMETRIE A POLY
         roof_a, face_a_large, face_a_small = calculate_complex_geometry(model, sirka, height, moduly, celkova_delka)
         p_data = get_surcharge_db("Plný polykarbonát", is_rock)
         
-        # Ochrana: Cena poly musí být číslo (např. 1000), ne procento
         poly_p = p_data['fix']
-        if poly_p < 10: poly_p = 1000 # Fallback
+        if poly_p < 10: poly_p = 1000
         
         if poly_strecha:
             c = roof_a * poly_p
@@ -712,7 +711,6 @@ else:
             c = ext_draha_m * val
             items.append({"pol": "Prodloužení dráhy", "det": f"+{ext_draha_m} m", "cen": c})
 
-        # MONTÁŽ
         mat_sum = sum(x['cen'] for x in items)
         
         c_montaz = 0
@@ -722,20 +720,15 @@ else:
             c_montaz = mat_sum * val
             items.append({"pol": "Montáž (ČR)", "det": f"{val*100:.0f}% z materiálu", "cen": c_montaz})
         
-        # SLEVA
-        sum_before_discount = sum(x['cen'] for x in items)
-        
         discount_val = 0
         if sleva_pct > 0:
-            discount_val = sum_before_discount * (sleva_pct / 100.0)
-            items.append({"pol": "SLEVA", "det": f"-{sleva_pct}% (bez dopravy)", "cen": -discount_val})
+            discount_val = mat_sum * (sleva_pct / 100.0)
+            items.append({"pol": "SLEVA", "det": f"-{sleva_pct}% (z materiálu)", "cen": -discount_val})
         
-        # DOPRAVA
         c_doprava = 0 if km == 0 else km * cena_za_km
         if km > 0:
             items.append({"pol": "Doprava", "det": f"{km} km x {cena_za_km} Kč", "cen": c_doprava})
 
-        # FINÁLNÍ SOUČET
         total_no_vat = sum(item['cen'] for item in items)
         dph_val = total_no_vat * (dph_sazba / 100.0)
         total_with_vat = total_no_vat + dph_val
@@ -745,7 +738,7 @@ else:
         with col1:
             st.subheader("Rozpočet")
             st.dataframe(pd.DataFrame(items), hide_index=True, use_container_width=True)
-            st.caption(f"ℹ️ {model}: odskok šířky {MODEL_PARAMS.get(model, MODEL_PARAMS['DEFAULT'])['step_w']}mm")
+            st.caption(f"DEBUG: Střecha {roof_a:.2f}m2, Velké čelo {face_a_large:.2f}m2, Malé čelo {face_a_small:.2f}m2")
         with col2:
             st.subheader("Celkem")
             st.metric("Bez DPH", f"{total_no_vat:,.0f} Kč")
