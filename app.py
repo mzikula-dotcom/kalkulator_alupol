@@ -18,7 +18,6 @@ FACE_WASTE_COEF = 0.85
 
 # --- DEFINICE MODELŮ A OBRÁZKŮ ---
 MODEL_PARAMS = {
-    # Standardní modely
     "PRACTIC":  {"step_w": 100, "step_h": 50, "img": "practic.png"},
     "DREAM":    {"step_w": 130, "step_h": 65, "img": "dream.png"},
     "HARMONY":  {"step_w": 130, "step_h": 65, "img": "harmony.png"},
@@ -26,18 +25,14 @@ MODEL_PARAMS = {
     "TERRACE":  {"step_w": 71,  "step_h": 65, "img": "terrace.png"}, 
     "HORIZONT": {"step_w": 130, "step_h": 65, "img": "horizont.png"}, 
     "STAR":     {"step_w": 130, "step_h": 65, "img": "star.png"},
-    
-    # Specifické modely (Dle Excelu mají Flash/Wave větší odskok)
     "WAVE":     {"step_w": 146, "step_h": 70, "img": "wave.png"},
     "FLASH":    {"step_w": 146, "step_h": 70, "img": "flash.png"},
-    
-    # Další modely
     "WING":     {"step_w": 130, "step_h": 65, "img": "wing.png"},
     "SUNSET":   {"step_w": 130, "step_h": 65, "img": "sunset.png"},
-    
     "DEFAULT":  {"step_w": 100, "step_h": 50, "img": None}
 }
 
+# Standardní délky (dle Excelu)
 STD_LENGTHS = {
     2: 4336,
     3: 6446,
@@ -164,16 +159,17 @@ def calculate_complex_geometry(model_name, width_input_mm, height_input_mm, modu
 # ########################################
 
 def get_surcharge_db(search_term, is_rock=False):
-    if not SessionLocal: return {"fix": 0, "pct": 0}
+    if not SessionLocal: return {"fix": 0, "pct": 0, "name": ""}
     session = SessionLocal()
     cat = "Rock" if is_rock else "Standard"
     try:
+        # Hledáme položku, která OBSAHUJE hledaný termín (ilike %term%)
         item = session.query(Priplatek).filter(Priplatek.kategorie == cat, Priplatek.nazev.ilike(f"%{search_term}%")).first()
         if not item and is_rock: 
              item = session.query(Priplatek).filter(Priplatek.kategorie == "Standard", Priplatek.nazev.ilike(f"%{search_term}%")).first()
         if item:
-            return {"fix": item.cena_fix, "pct": item.cena_pct}
-        return {"fix": 0, "pct": 0}
+            return {"fix": item.cena_fix, "pct": item.cena_pct, "name": item.nazev}
+        return {"fix": 0, "pct": 0, "name": "Nenalezeno"}
     finally:
         session.close()
 
@@ -411,7 +407,6 @@ with st.sidebar.expander("🔐 Servisní zóna (Admin)"):
                     counter = 0
                     for idx, row in df_c.iterrows():
                         first_col = str(row[0]).strip()
-                        # Zde kontrolujeme všechny známé modely
                         if first_col.upper() in MODEL_PARAMS.keys():
                             current_model = first_col.upper()
                             continue
@@ -524,10 +519,9 @@ else:
 
     with st.sidebar:
         st.header("1. Parametry")
-        # Automatické načtení modelů z definice
         models_list = list(MODEL_PARAMS.keys())
         if "DEFAULT" in models_list: models_list.remove("DEFAULT")
-        models_list.sort() # Seřadit abecedně
+        models_list.sort()
         
         def_model = get_val('model', "PRACTIC")
         model = st.selectbox("Model", models_list, index=models_list.index(def_model) if def_model in models_list else 0)
@@ -536,6 +530,7 @@ else:
         sirka = st.number_input("Šířka mezi kolejemi (mm)", 2000, 8000, get_val('sirka', 3500), step=10)
         moduly = st.slider("Počet modulů", 2, 7, get_val('moduly', 3))
         
+        # NOVÉ: Zobrazení standardní délky
         std_len = STD_LENGTHS.get(moduly, moduly * 2190)
         st.caption(f"Standardní délka pro {moduly} moduly: {std_len} mm")
         celkova_delka = st.number_input("Celková délka (mm)", 2000, 20000, get_val('celkova_delka', std_len), step=10)
@@ -615,16 +610,33 @@ else:
         avg_mod_len = int(celkova_delka / moduly)
         items.append({"pol": f"Zastřešení {model}", "det": f"{moduly} seg., Š: {sirka}mm ({avg_mod_len} mm/mod)", "cen": base_price})
         
+        # NOVÁ LOGIKA PRODLOUŽENÍ
         if diff_len > 10:
-            p_data = get_surcharge_db("Prodloužení modulu", is_rock)
-            p_meter_data = get_surcharge_db("za metr", is_rock)
-            fix_prod = p_data['fix'] if p_data['fix'] > 0 else 3000
-            per_m = p_meter_data['fix'] if p_meter_data['fix'] > 0 else 2000
-            items.append({"pol": "Atypická délka (Prodloužení)", "det": f"+{diff_len} mm", "cen": fix_prod + (diff_len / 1000.0) * per_m})
+            # 1. Hledáme "Prodloužení" (očekáváme cenu za bm)
+            p_prod = get_surcharge_db("Prodloužení", is_rock)
+            # 2. Hledáme "Atypická délka" (očekáváme fixní příplatek)
+            p_atyp = get_surcharge_db("Atypická délka", is_rock)
+            
+            # Pokud v DB chybí fix, použijeme default 3000
+            fix_cost = p_atyp['fix'] if p_atyp['fix'] > 0 else 3000
+            
+            # Pokud v DB chybí cena za metr, použijeme default 2000
+            # Pozn: p_prod['fix'] by měla být cena za 1 bm
+            var_cost_per_m = p_prod['fix'] if p_prod['fix'] > 0 else 2000
+            
+            # Výpočet: (metry navíc * cena za metr) + fix
+            total_extension_cost = ((diff_len / 1000.0) * var_cost_per_m) + fix_cost
+            
+            items.append({
+                "pol": "Prodloužení zastřešení (Atyp)", 
+                "det": f"+{diff_len} mm ({fix_cost} fix + {var_cost_per_m}/m)", 
+                "cen": total_extension_cost
+            })
+
         elif diff_len < -10:
-            p_data = get_surcharge_db("Zkrácení modulu", is_rock)
-            val = p_data['fix'] if p_data['fix'] > 0 else 1500
-            items.append({"pol": "Atypická délka (Zkrácení)", "det": f"{diff_len} mm", "cen": val})
+            p_zkrac = get_surcharge_db("Zkrácení", is_rock)
+            val = p_zkrac['fix'] if p_zkrac['fix'] > 0 else 1500
+            items.append({"pol": "Zkrácení zastřešení (Atyp)", "det": f"{diff_len} mm", "cen": val})
 
         if "Stříbrný" in barva_typ:
             val = base_price * -0.10
