@@ -14,7 +14,7 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy import func
 
 # --- VERZE APLIKACE ---
-APP_VERSION = "55.0 (All Expanded)"
+APP_VERSION = "56.0 (Compact Sidebar)"
 
 # --- HESLO ADMINA ---
 ADMIN_PASSWORD = "admin123"
@@ -52,11 +52,20 @@ except ImportError:
 
 st.set_page_config(page_title=f"Rentmil v{APP_VERSION}", layout="wide", page_icon="🏊‍♂️")
 
-# CSS - Kompaktnější vzhled
+# CSS - Kompaktnější vzhled + ZÚŽENÍ SIDEBARU
 st.markdown("""
     <style>
-        .block-container {padding-top: 1rem; padding-bottom: 2rem; padding-left: 3rem; padding-right: 3rem;}
+        /* Zmenšení paddingu pro hlavní obsah */
+        .block-container {padding-top: 1rem; padding-bottom: 2rem; padding-left: 2rem; padding-right: 2rem;}
         h1 {padding-top: 0rem;}
+        
+        /* ZÚŽENÍ POSTRANNÍHO PANELU (SIDEBAR) */
+        [data-testid="stSidebar"] {
+            min-width: 260px;
+            max-width: 260px;
+        }
+        
+        /* Stylování karet a expanderů */
         .metric-card {background-color: #f0f2f6; padding: 15px; border-radius: 10px; border-left: 5px solid #004b96;}
         div[data-testid="stExpander"] div[role="button"] p {font-size: 1.1rem; font-weight: bold; color: #004b96;}
     </style>
