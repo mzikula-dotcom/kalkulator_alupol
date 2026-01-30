@@ -13,15 +13,17 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy import func
 
 # --- VERZE APLIKACE ---
-APP_VERSION = "50.0 (Database Driven)"
+APP_VERSION = "51.0 (New UI Layout)"
 
 # --- KONFIGURACE VÝROBY ---
 ROOF_OVERLAP_MM = 100 
 FACE_WASTE_COEF = 0.85 
+# Koeficient pro přepočet skutečné plochy na ceníkovou (kalibrováno na Wave 3S: 18400 Kč)
+POLY_PRICING_FACTOR = 0.394
 
 # --- ZÁLOŽNÍ HODNOTY (POKUD NEJSOU V DB) ---
-DEFAULT_POLY_FACTOR = 0.394
 DEFAULT_RAIL_PRICES = {2: 910, 3: 2730, 4: 5460, 5: 9100, 6: 13650, 7: 19106}
+DEFAULT_POLY_FACTOR = 0.394
 
 # --- DEFINICE MODELŮ A OBRÁZKŮ ---
 MODEL_PARAMS = {
@@ -48,6 +50,7 @@ try:
 except ImportError:
     st.error("Chybí knihovna Playwright.")
 
+# Nastavení layoutu na WIDE (široké zobrazení)
 st.set_page_config(page_title=f"Kalkulátor Rentmil v{APP_VERSION}", layout="wide", page_icon="🏊‍♂️")
 
 if 'form_data' not in st.session_state:
@@ -190,15 +193,24 @@ def calculate_base_price_db(model, width_mm, modules):
     session = SessionLocal()
     try:
         count = session.query(Cenik).filter(Cenik.model == model).count()
-        if count == 0: return 0, 0, f"Ceník pro {model} je prázdný!"
-        row = session.query(Cenik).filter(Cenik.model == model, Cenik.moduly == modules, Cenik.sirka_mm >= width_mm).order_by(Cenik.sirka_mm.asc()).first()
-        if row: return row.cena, row.vyska * 1000, None
+        if count == 0: 
+            return 0, 0, f"Ceník pro {model} je prázdný!"
+        row = session.query(Cenik).filter(
+            Cenik.model == model,
+            Cenik.moduly == modules,
+            Cenik.sirka_mm >= width_mm
+        ).order_by(Cenik.sirka_mm.asc()).first()
+        if row:
+            return row.cena, row.vyska * 1000, None
         else:
             max_row = session.query(Cenik).filter(Cenik.model == model, Cenik.moduly == modules).order_by(Cenik.sirka_mm.desc()).first()
-            if max_row: return 0, 0, f"Mimo rozsah (Max pro {model} je {max_row.sirka_mm} mm)"
+            if max_row:
+                return 0, 0, f"Mimo rozsah (Max pro {model} je {max_row.sirka_mm} mm)"
             return 0, 0, "Rozměr nebo počet modulů nenalezen"
-    except Exception as e: return 0,0, str(e)
-    finally: session.close()
+    except Exception as e:
+        return 0,0, str(e)
+    finally:
+        session.close()
 
 def calculate_extension_price_final(model, width_mm, modules):
     if not SessionLocal: return 0
@@ -206,15 +218,23 @@ def calculate_extension_price_final(model, width_mm, modules):
     try:
         row_curr = session.query(Cenik).filter(Cenik.model == model, Cenik.moduly == modules, Cenik.sirka_mm >= width_mm).order_by(Cenik.sirka_mm.asc()).first()
         row_next = session.query(Cenik).filter(Cenik.model == model, Cenik.moduly == modules + 1, Cenik.sirka_mm >= width_mm).order_by(Cenik.sirka_mm.asc()).first()
+        
         mod_len = 2110.0
+        
         structure_part = 0
-        if row_curr and row_next: structure_part = row_next.cena - row_curr.cena
+        if row_curr and row_next:
+            structure_part = row_next.cena - row_curr.cena
         else:
             row_prev = session.query(Cenik).filter(Cenik.model == model, Cenik.moduly == modules - 1, Cenik.sirka_mm >= width_mm).order_by(Cenik.sirka_mm.asc()).first()
-            if row_curr and row_prev: structure_part = row_curr.cena - row_prev.cena
+            if row_curr and row_prev:
+                structure_part = row_curr.cena - row_prev.cena
+        
         rail_part = get_rail_price_from_db(modules)
-        return (structure_part + rail_part) / (mod_len / 1000.0)
-    finally: session.close()
+        
+        price_per_meter = (structure_part + rail_part) / (mod_len / 1000.0)
+        return price_per_meter
+    finally:
+        session.close()
 
 def save_offer_to_db(data_dict, total_price):
     if not SessionLocal: return False, "DB Error"
@@ -225,14 +245,18 @@ def save_offer_to_db(data_dict, total_price):
         session.add(nova_nabidka)
         session.commit()
         return True, "Uloženo."
-    except Exception as e: return False, str(e)
-    finally: session.close()
+    except Exception as e:
+        return False, str(e)
+    finally:
+        session.close()
 
 def get_all_offers():
     if not SessionLocal: return []
     session = SessionLocal()
-    try: return session.query(Nabidka).order_by(Nabidka.datum_vytvoreni.desc()).all()
-    finally: session.close()
+    try:
+        return session.query(Nabidka).order_by(Nabidka.datum_vytvoreni.desc()).all()
+    finally:
+        session.close()
 
 def delete_offer(offer_id):
     if not SessionLocal: return
@@ -242,18 +266,21 @@ def delete_offer(offer_id):
         if offer:
             session.delete(offer)
             session.commit()
-    finally: session.close()
+    finally:
+        session.close()
 
 def img_to_base64(img_path):
     current_dir = os.path.dirname(os.path.abspath(__file__))
     full_path = os.path.join(current_dir, img_path)
     if os.path.exists(full_path):
-        with open(full_path, "rb") as img_file: return base64.b64encode(img_file.read()).decode('utf-8')
+        with open(full_path, "rb") as img_file:
+            return base64.b64encode(img_file.read()).decode('utf-8')
     files = os.listdir(current_dir)
     for f in files:
         if f.lower() == img_path.lower():
             full_path = os.path.join(current_dir, f)
-            with open(full_path, "rb") as img_file: return base64.b64encode(img_file.read()).decode('utf-8')
+            with open(full_path, "rb") as img_file:
+                return base64.b64encode(img_file.read()).decode('utf-8')
     return None
 
 def generate_pdf_html(zak_udaje, items, totals, model_name):
@@ -392,7 +419,8 @@ def generate_pdf_html(zak_udaje, items, totals, model_name):
         pdf_bytes = page.pdf(format="A4", print_background=True, margin={"top": "0cm", "right": "0cm", "bottom": "0cm", "left": "0cm"})
         browser.close()
     return pdf_bytes
-    st.sidebar.title("Navigace")
+
+st.sidebar.title("Navigace")
 page_mode = st.sidebar.radio("Režim:", ["Kalkulátor", "Historie Nabídek"])
 
 # --- ADMIN ---
@@ -521,249 +549,263 @@ else:
                 st.date_input("Platnost do:", value=platnost_do, disabled=True)
             termin_dodani = st.text_input("Termín dodání", value=get_val('termin_dodani', "dle dohody (cca 6-8 týdnů)"))
 
-    with st.sidebar:
-        st.header("1. Parametry")
-        models_list = list(MODEL_PARAMS.keys())
-        if "DEFAULT" in models_list: models_list.remove("DEFAULT")
-        models_list.sort()
-        
-        def_model = get_val('model', "PRACTIC")
-        model = st.selectbox("Model", models_list, index=models_list.index(def_model) if def_model in models_list else 0)
-        is_rock = (model.upper() == "ROCK")
-        
-        sirka = st.number_input("Šířka mezi kolejemi (mm)", 2000, 8000, get_val('sirka', 3500), step=10)
-        moduly = st.slider("Počet modulů", 2, 7, get_val('moduly', 3))
-        
-        std_len = STD_LENGTHS.get(moduly, moduly * 2190)
-        st.caption(f"Standardní délka pro {moduly} moduly: {std_len} mm")
-        celkova_delka = st.number_input("Celková délka (mm)", 2000, 20000, get_val('celkova_delka', std_len), step=10)
-        diff_len = celkova_delka - std_len
-        
-        pocet_prod_modulu = 1
-        if diff_len > 10:
-            pocet_prod_modulu = st.number_input("Počet prodloužených modulů", 1, moduly, get_val('pocet_prod_modulu', 1))
+    # === NOVÝ LAYOUT: 2 SLOUPCE (Input vs Výsledek) ===
+    col_input, col_result = st.columns([3, 2], gap="large")
 
-        st.markdown("---")
-        st.header("2. Barvy a Polykarbonát")
-        barvy_opts = ["Stříbrný Elox (Bonus -10 000 Kč)", "Bronzový Elox", "Antracitový Elox", "RAL Nástřik"]
-        def_barva = get_val('barva_typ', barvy_opts[0])
-        barva_typ = st.selectbox("Barva konstrukce", barvy_opts, index=barvy_opts.index(def_barva) if def_barva in barvy_opts else 0)
+    with col_input:
+        st.subheader("⚙️ Konfigurace")
         
-        ral_kod = ""
-        if "RAL" in barva_typ:
-            ral_kod = st.text_input("Číslo RAL (např. 7016)", value=get_val('ral_kod', ""))
-
-        poly_strecha = st.checkbox("Plný polykarbonát - STŘECHA", value=get_val('poly_strecha', False))
-        
-        col_poly1, col_poly2 = st.columns(2)
-        with col_poly1:
-             poly_celo_male = st.checkbox("Plný poly - MALÉ čelo", value=get_val('poly_celo_male', False))
-        with col_poly2:
-             poly_celo_velke = st.checkbox("Plný poly - VELKÉ čelo", value=get_val('poly_celo_velke', False))
-             
-        change_color_poly = st.checkbox("Změna barvy polykarbonátu", value=get_val('change_color_poly', False))
-
-        st.markdown("---")
-        st.header("3. Doplňky a Dveře")
-        
-        st.subheader("Dveře v čele (VČ)")
-        pocet_dvere_vc = st.number_input("Ks VČ", 0, 2, get_val('pocet_dvere_vc', 0))
-        if pocet_dvere_vc > 0:
-            dvere_vc_sirka = st.number_input("Šířka dveří VČ (mm)", 600, 1200, get_val('dvere_vc_sirka', 800))
-            dvere_vc_typ = st.selectbox("Typ VČ", ["Panty", "Posuvné"], index=0)
-        
-        st.subheader("Boční vstup (Bok)")
-        pocet_dvere_bok = st.number_input("Ks Bok", 0, 4, get_val('pocet_dvere_bok', 0))
-        if pocet_dvere_bok > 0:
-             dvere_bok_umisteni = st.selectbox("Umístění", ["Vlevo", "Vpravo", "Oboustranně"])
-
-        st.markdown("---")
-        zamykaci_klika = st.checkbox("Zamykací klika", value=get_val('zamykaci_klika', False))
-        uzamykani_segmentu = st.checkbox("Uzamykání segmentů", value=get_val('uzamykani_segmentu', False))
-        klapka = st.checkbox("Větrací klapka", value=get_val('klapka', False))
-        
-        col_cela1, col_cela2 = st.columns(2)
-        with col_cela1: bez_maleho_cela = st.checkbox("BEZ malého čela", value=get_val('bez_maleho_cela', False))
-        with col_cela2: bez_velkeho_cela = st.checkbox("BEZ velkého čela", value=get_val('bez_velkeho_cela', False))
-        vyklopne_celo = st.checkbox("Výklopné čelo", value=get_val('vyklopne_celo', False))
-
-        st.markdown("---")
-        st.header("4. Koleje")
-        pochozi_koleje = st.checkbox("Pochozí koleje", value=get_val('pochozi_koleje', False))
-        pochozi_koleje_zdarma = st.checkbox("➡️ Akce: Koleje ZDARMA", value=get_val('pochozi_koleje_zdarma', False))
-        obousmerne_koleje = st.checkbox("Obousměrné koleje", value=get_val('obousmerne_koleje', False))
-        
-        barva_koleji = st.selectbox("Barva kolejí", ["Stříbrný Elox", "Bronz", "Antracit"], index=0)
-        
-        ext_draha_m = st.number_input("Prodloužení dráhy (m)", 0.0, 20.0, get_val('ext_draha_m', 0.0), step=0.5)
-        podhori = st.checkbox("Zpevnění Podhoří", value=get_val('podhori', False))
-
-        st.markdown("---")
-        st.header("5. Ostatní")
-        col_km1, col_km2 = st.columns(2)
-        with col_km1: km = st.number_input("Doprava (km)", 0, 5000, get_val('km', 0))
-        with col_km2: cena_za_km = st.number_input("Cena za km", 0, 100, get_val('cena_za_km', 18))
+        with st.expander("1. Parametry", expanded=True):
+            models_list = list(MODEL_PARAMS.keys())
+            if "DEFAULT" in models_list: models_list.remove("DEFAULT")
+            models_list.sort()
             
-        montaz = st.checkbox("Montáž", value=get_val('montaz', True))
-        sleva_pct = st.number_input("Sleva (%)", 0, 100, get_val('sleva_pct', 0))
-        dph_sazba = st.selectbox("DPH", [21, 12, 0], index=0)
-
-    # --- VÝPOČET ---
-    base_price, height, err = calculate_base_price_db(model, sirka, moduly)
-
-    if err: st.error(f"⚠️ {err}")
-    else:
-        items = []
-        avg_mod_len = int(celkova_delka / moduly)
-        items.append({"pol": f"Zastřešení {model}", "det": f"{moduly} seg., Š: {sirka}mm ({avg_mod_len} mm/mod)", "cen": base_price})
-        
-        # PRODLOUŽENÍ (VÝPOČET 50.0 - DATABASE DRIVEN)
-        roof_a, face_a_large, face_a_small, total_arc_len_mm = calculate_complex_geometry(model, sirka, height, moduly, celkova_delka)
-        
-        if diff_len > 10:
-            p_fix_mod = get_surcharge_db("Prodloužení modulu", is_rock)
-            fix_price = p_fix_mod['fix'] if p_fix_mod['fix'] > 0 else 3000
-            total_fix = pocet_prod_modulu * fix_price
+            def_model = get_val('model', "PRACTIC")
+            model = st.selectbox("Model", models_list, index=models_list.index(def_model) if def_model in models_list else 0)
+            is_rock = (model.upper() == "ROCK")
             
-            p_var_mat = get_surcharge_db("Prodloužení modulu za metr", is_rock)
-            mat_price_unit = p_var_mat['fix'] if p_var_mat['fix'] > 0 else 2000
+            c1, c2 = st.columns(2)
+            with c1:
+                sirka = st.number_input("Šířka mezi kolejemi (mm)", 2000, 8000, get_val('sirka', 3500), step=10)
+            with c2:
+                moduly = st.slider("Počet modulů", 2, 7, get_val('moduly', 3))
             
-            factor_val = get_poly_factor_from_db()
-            total_var = (total_arc_len_mm * factor_val) * (diff_len / 1000000.0) * mat_price_unit
-            total_extension_cost = total_fix + total_var
+            std_len = STD_LENGTHS.get(moduly, moduly * 2190)
+            st.caption(f"Standardní délka pro {moduly} moduly: {std_len} mm")
+            celkova_delka = st.number_input("Celková délka (mm)", 2000, 20000, get_val('celkova_delka', std_len), step=10)
+            diff_len = celkova_delka - std_len
             
-            items.append({
-                "pol": f"Prodloužení {pocet_prod_modulu} modulů (Atyp)", 
-                "det": f"Celkem +{diff_len} mm (Fix {total_fix:,.0f} + Mat {total_var:,.0f})", 
-                "cen": total_extension_cost
-            })
+            pocet_prod_modulu = 1
+            if diff_len > 10:
+                pocet_prod_modulu = st.number_input("Počet prodloužených modulů", 1, moduly, get_val('pocet_prod_modulu', 1))
 
-        elif diff_len < -10:
-            p_zkrac = get_surcharge_db("Zkrácení", is_rock)
-            val = p_zkrac['fix'] if p_zkrac['fix'] > 0 else 1500
-            items.append({"pol": "Zkrácení zastřešení (Atyp)", "det": f"{diff_len} mm", "cen": val})
+        with st.expander("2. Barvy a Polykarbonát"):
+            barvy_opts = ["Stříbrný Elox (Bonus -10 000 Kč)", "Bronzový Elox", "Antracitový Elox", "RAL Nástřik"]
+            def_barva = get_val('barva_typ', barvy_opts[0])
+            barva_typ = st.selectbox("Barva konstrukce", barvy_opts, index=barvy_opts.index(def_barva) if def_barva in barvy_opts else 0)
+            
+            ral_kod = ""
+            if "RAL" in barva_typ:
+                ral_kod = st.text_input("Číslo RAL (např. 7016)", value=get_val('ral_kod', ""))
 
-        if "Stříbrný" in barva_typ:
-            val = base_price * -0.10
-            items.append({"pol": "BONUS: Stříbrný Elox", "det": "Sleva 10% ze základu", "cen": val})
-        elif "RAL" in barva_typ:
-            p_data = get_surcharge_db("RAL", is_rock)
-            val = p_data['pct'] if p_data['pct'] > 0 else 0.20
-            ral_text = f" ({ral_kod})" if ral_kod else ""
-            items.append({"pol": f"Příplatek RAL{ral_text}", "det": f"{val*100:.0f}%", "cen": base_price * val})
-        elif "Bronz" in barva_typ:
-            p_data = get_surcharge_db("BR elox", is_rock)
-            val = p_data['pct'] if p_data['pct'] > 0 else 0.05
-            items.append({"pol": "Příplatek Bronz", "det": f"{val*100:.0f}%", "cen": base_price * val})
-        elif "Antracit" in barva_typ:
-            p_data = get_surcharge_db("antracit elox", is_rock)
-            val = p_data['pct'] if p_data['pct'] > 0 else 0.05
-            items.append({"pol": "Příplatek Antracit", "det": f"{val*100:.0f}%", "cen": base_price * val})
+            poly_strecha = st.checkbox("Plný polykarbonát - STŘECHA", value=get_val('poly_strecha', False))
+            
+            cp1, cp2 = st.columns(2)
+            with cp1:
+                 poly_celo_male = st.checkbox("Plný poly - MALÉ čelo", value=get_val('poly_celo_male', False))
+            with cp2:
+                 poly_celo_velke = st.checkbox("Plný poly - VELKÉ čelo", value=get_val('poly_celo_velke', False))
+                 
+            change_color_poly = st.checkbox("Změna barvy polykarbonátu", value=get_val('change_color_poly', False))
 
-        p_data = get_surcharge_db("Plný polykarbonát", is_rock)
-        val_db = p_data['fix'] or 0
-        poly_p = val_db if val_db > 10 else 2000 # Default 2000
+        with st.expander("3. Doplňky a Dveře"):
+            st.subheader("Dveře v čele (VČ)")
+            c_d1, c_d2, c_d3 = st.columns(3)
+            with c_d1:
+                pocet_dvere_vc = st.number_input("Ks VČ", 0, 2, get_val('pocet_dvere_vc', 0))
+            with c_d2:
+                if pocet_dvere_vc > 0:
+                    dvere_vc_sirka = st.number_input("Šířka dveří VČ (mm)", 600, 1200, get_val('dvere_vc_sirka', 800))
+            with c_d3:
+                if pocet_dvere_vc > 0:
+                    dvere_vc_typ = st.selectbox("Typ VČ", ["Panty", "Posuvné"], index=0)
+            
+            st.subheader("Boční vstup (Bok)")
+            c_b1, c_b2 = st.columns(2)
+            with c_b1:
+                pocet_dvere_bok = st.number_input("Ks Bok", 0, 4, get_val('pocet_dvere_bok', 0))
+            with c_b2:
+                if pocet_dvere_bok > 0:
+                     dvere_bok_umisteni = st.selectbox("Umístění", ["Vlevo", "Vpravo", "Oboustranně"])
+
+            st.markdown("---")
+            col_x1, col_x2 = st.columns(2)
+            with col_x1:
+                zamykaci_klika = st.checkbox("Zamykací klika", value=get_val('zamykaci_klika', False))
+                uzamykani_segmentu = st.checkbox("Uzamykání segmentů", value=get_val('uzamykani_segmentu', False))
+                klapka = st.checkbox("Větrací klapka", value=get_val('klapka', False))
+            with col_x2:
+                bez_maleho_cela = st.checkbox("BEZ malého čela", value=get_val('bez_maleho_cela', False))
+                bez_velkeho_cela = st.checkbox("BEZ velkého čela", value=get_val('bez_velkeho_cela', False))
+                vyklopne_celo = st.checkbox("Výklopné čelo", value=get_val('vyklopne_celo', False))
+
+        with st.expander("4. Koleje"):
+            col_k1, col_k2 = st.columns(2)
+            with col_k1:
+                pochozi_koleje = st.checkbox("Pochozí koleje", value=get_val('pochozi_koleje', False))
+                pochozi_koleje_zdarma = st.checkbox("➡️ Akce: Koleje ZDARMA", value=get_val('pochozi_koleje_zdarma', False))
+                obousmerne_koleje = st.checkbox("Obousměrné koleje", value=get_val('obousmerne_koleje', False))
+            with col_k2:
+                barva_koleji = st.selectbox("Barva kolejí", ["Stříbrný Elox", "Bronz", "Antracit"], index=0)
+                ext_draha_m = st.number_input("Prodloužení dráhy (m)", 0.0, 20.0, get_val('ext_draha_m', 0.0), step=0.5)
+                podhori = st.checkbox("Zpevnění Podhoří", value=get_val('podhori', False))
+
+        with st.expander("5. Ostatní"):
+            col_o1, col_o2 = st.columns(2)
+            with col_o1: 
+                km = st.number_input("Doprava (km)", 0, 5000, get_val('km', 0))
+                cena_za_km = st.number_input("Cena za km", 0, 100, get_val('cena_za_km', 18))
+            with col_o2:
+                montaz = st.checkbox("Montáž", value=get_val('montaz', True))
+                sleva_pct = st.number_input("Sleva (%)", 0, 100, get_val('sleva_pct', 0))
+                dph_sazba = st.selectbox("DPH", [21, 12, 0], index=0)
+
+    # --- VÝPOČET A VÝSLEDEK (PRAVÝ SLOUPEC) ---
+    with col_result:
+        st.subheader("💰 Kalkulace")
         
-        if poly_strecha: items.append({"pol": "Plný poly (Střecha)", "det": f"{roof_a:.1f} m²", "cen": roof_a * poly_p})
-        if poly_celo_male and not bez_maleho_cela: items.append({"pol": "Plný poly (Malé čelo)", "det": f"{face_a_small:.1f} m²", "cen": face_a_small * poly_p})
-        if poly_celo_velke and not bez_velkeho_cela: items.append({"pol": "Plný poly (Velké čelo)", "det": f"{face_a_large:.1f} m²", "cen": face_a_large * poly_p})
+        base_price, height, err = calculate_base_price_db(model, sirka, moduly)
 
-        if change_color_poly:
-            p_data = get_surcharge_db("barvy poly", is_rock)
-            val = p_data['pct'] if p_data['pct'] > 0 else 0.07
-            items.append({"pol": "Změna barvy poly", "det": f"{val*100:.0f}%", "cen": base_price * val})
-
-        if podhori:
-            p_data = get_surcharge_db("podhorskou", is_rock)
-            val = p_data['pct'] if p_data['pct'] > 0 else 0.15
-            items.append({"pol": "Zpevnění Podhoří", "det": f"{val*100:.0f}%", "cen": base_price * val})
-
-        doors = []
-        p_vc = get_surcharge_db("Jednokřídlé dveře", is_rock)['fix'] or 5000
-        p_bok = get_surcharge_db("boční vstup", is_rock)['fix'] or 7000
-        for _ in range(pocet_dvere_vc): doors.append(("Dveře v čele", p_vc))
-        for _ in range(pocet_dvere_bok): doors.append(("Boční vstup", p_bok))
-        if doors:
-            doors.sort(key=lambda x: x[1], reverse=True)
-            free = doors.pop(0)
-            items.append({"pol": f"{free[0]} (1. ks)", "det": "ZDARMA", "cen": 0})
-            for n, p in doors: items.append({"pol": n, "det": "Další kus", "cen": p})
-
-        if zamykaci_klika and (pocet_dvere_vc + pocet_dvere_bok) > 0:
-            val = get_surcharge_db("Uzamykání dveří", is_rock)['fix'] or 800
-            items.append({"pol": "Zamykací klika", "det": f"{pocet_dvere_vc + pocet_dvere_bok} ks", "cen": (pocet_dvere_vc + pocet_dvere_bok) * val})
+        if err: st.error(f"⚠️ {err}")
+        else:
+            items = []
+            avg_mod_len = int(celkova_delka / moduly)
+            items.append({"pol": f"Zastřešení {model}", "det": f"{moduly} seg., Š: {sirka}mm", "cen": base_price})
             
-        if uzamykani_segmentu:
-            val = 1500 
-            items.append({"pol": "Uzamykání segmentů", "det": "", "cen": val})
-
-        if klapka:
-            val = get_surcharge_db("klapka", is_rock)['fix'] or 7000
-            items.append({"pol": "Větrací klapka", "det": "", "cen": val})
+            roof_a, face_a_large, face_a_small, total_arc_len_mm = calculate_complex_geometry(model, sirka, height, moduly, celkova_delka)
             
-        if vyklopne_celo:
-            val = 5000
-            items.append({"pol": "Výklopné čelo", "det": "", "cen": val})
+            if diff_len > 10:
+                p_fix_mod = get_surcharge_db("Prodloužení modulu", is_rock)
+                fix_price = p_fix_mod['fix'] if p_fix_mod['fix'] > 0 else 3000
+                total_fix = pocet_prod_modulu * fix_price
+                
+                p_var_mat = get_surcharge_db("Prodloužení modulu za metr", is_rock)
+                mat_price_unit = p_var_mat['fix'] if p_var_mat['fix'] > 0 else 2000
+                
+                factor_val = get_poly_factor_from_db()
+                total_var = (total_arc_len_mm * factor_val) * (diff_len / 1000000.0) * mat_price_unit
+                total_extension_cost = total_fix + total_var
+                
+                items.append({
+                    "pol": f"Prodloužení {pocet_prod_modulu} modulů (Atyp)", 
+                    "det": f"+{diff_len} mm", 
+                    "cen": total_extension_cost
+                })
 
-        if pochozi_koleje:
-            m_rail = (celkova_delka / 1000.0) * 2
-            items.append({"pol": "Pochozí koleje", "det": f"{m_rail:.1f} m (Standard)", "cen": 0})
+            elif diff_len < -10:
+                p_zkrac = get_surcharge_db("Zkrácení", is_rock)
+                val = p_zkrac['fix'] if p_zkrac['fix'] > 0 else 1500
+                items.append({"pol": "Zkrácení zastřešení (Atyp)", "det": f"{diff_len} mm", "cen": val})
 
-        if obousmerne_koleje:
-            m_rail = (celkova_delka / 1000.0) * 2
-            if pochozi_koleje_zdarma:
-                items.append({"pol": "Obousměrné koleje", "det": "AKCE ZDARMA", "cen": 0})
-            else:
-                val = get_surcharge_db("Pochozí kolejnice", is_rock)['fix'] or 330
-                items.append({"pol": "Obousměrné koleje (Příplatek)", "det": f"+{m_rail:.1f} m", "cen": m_rail * val})
+            if "Stříbrný" in barva_typ:
+                val = base_price * -0.10
+                items.append({"pol": "BONUS: Stříbrný Elox", "det": "Sleva 10% ze základu", "cen": val})
+            elif "RAL" in barva_typ:
+                p_data = get_surcharge_db("RAL", is_rock)
+                val = p_data['pct'] if p_data['pct'] > 0 else 0.20
+                ral_text = f" ({ral_kod})" if ral_kod else ""
+                items.append({"pol": f"Příplatek RAL{ral_text}", "det": f"{val*100:.0f}%", "cen": base_price * val})
+            elif "Bronz" in barva_typ:
+                p_data = get_surcharge_db("BR elox", is_rock)
+                val = p_data['pct'] if p_data['pct'] > 0 else 0.05
+                items.append({"pol": "Příplatek Bronz", "det": f"{val*100:.0f}%", "cen": base_price * val})
+            elif "Antracit" in barva_typ:
+                p_data = get_surcharge_db("antracit elox", is_rock)
+                val = p_data['pct'] if p_data['pct'] > 0 else 0.05
+                items.append({"pol": "Příplatek Antracit", "det": f"{val*100:.0f}%", "cen": base_price * val})
 
-        if ext_draha_m > 0:
-            val = get_surcharge_db("Jeden metr koleje", is_rock)['fix'] or 220
-            items.append({"pol": "Prodloužení dráhy", "det": f"+{ext_draha_m} m", "cen": ext_draha_m * val})
+            p_data = get_surcharge_db("Plný polykarbonát", is_rock)
+            val_db = p_data['fix'] or 0
+            poly_p = val_db if val_db > 10 else 2000
             
-        if barva_koleji:
-             items.append({"pol": f"Barva kolejí: {barva_koleji}", "det": "", "cen": 0})
+            if poly_strecha: items.append({"pol": "Plný poly (Střecha)", "det": f"{roof_a:.1f} m²", "cen": roof_a * poly_p})
+            if poly_celo_male and not bez_maleho_cela: items.append({"pol": "Plný poly (Malé čelo)", "det": f"{face_a_small:.1f} m²", "cen": face_a_small * poly_p})
+            if poly_celo_velke and not bez_velkeho_cela: items.append({"pol": "Plný poly (Velké čelo)", "det": f"{face_a_large:.1f} m²", "cen": face_a_large * poly_p})
 
-        mat_sum = sum(x['cen'] for x in items)
-        
-        c_montaz = 0
-        if montaz:
-            p_data = get_surcharge_db("Montáž zastřešení v ČR", is_rock)
-            val = p_data['pct'] if p_data['pct'] > 0 else 0.08
-            c_montaz = mat_sum * val
-            items.append({"pol": "Montáž (ČR)", "det": f"{val*100:.0f}% z materiálu", "cen": c_montaz})
-        
-        discount_val = 0
-        if sleva_pct > 0:
-            discount_val = mat_sum * (sleva_pct / 100.0)
-            items.append({"pol": "SLEVA", "det": f"-{sleva_pct}% (z materiálu)", "cen": -discount_val})
-        
-        c_doprava = 0 if km == 0 else km * cena_za_km
-        if km > 0: items.append({"pol": "Doprava", "det": f"{km} km x {cena_za_km} Kč", "cen": c_doprava})
+            if change_color_poly:
+                p_data = get_surcharge_db("barvy poly", is_rock)
+                val = p_data['pct'] if p_data['pct'] > 0 else 0.07
+                items.append({"pol": "Změna barvy poly", "det": f"{val*100:.0f}%", "cen": base_price * val})
 
-        total_no_vat = sum(item['cen'] for item in items)
-        dph_val = total_no_vat * (dph_sazba / 100.0)
-        total_with_vat = total_no_vat + dph_val
+            if podhori:
+                p_data = get_surcharge_db("podhorskou", is_rock)
+                val = p_data['pct'] if p_data['pct'] > 0 else 0.15
+                items.append({"pol": "Zpevnění Podhoří", "det": f"{val*100:.0f}%", "cen": base_price * val})
 
-        st.divider()
-        col1, col2 = st.columns([1.5, 1])
-        with col1:
-            st.subheader("Rozpočet")
+            doors = []
+            p_vc = get_surcharge_db("Jednokřídlé dveře", is_rock)['fix'] or 5000
+            p_bok = get_surcharge_db("boční vstup", is_rock)['fix'] or 7000
+            for _ in range(pocet_dvere_vc): doors.append(("Dveře v čele", p_vc))
+            for _ in range(pocet_dvere_bok): doors.append(("Boční vstup", p_bok))
+            if doors:
+                doors.sort(key=lambda x: x[1], reverse=True)
+                free = doors.pop(0)
+                items.append({"pol": f"{free[0]} (1. ks)", "det": "ZDARMA", "cen": 0})
+                for n, p in doors: items.append({"pol": n, "det": "Další kus", "cen": p})
+
+            if zamykaci_klika and (pocet_dvere_vc + pocet_dvere_bok) > 0:
+                val = get_surcharge_db("Uzamykání dveří", is_rock)['fix'] or 800
+                items.append({"pol": "Zamykací klika", "det": f"{pocet_dvere_vc + pocet_dvere_bok} ks", "cen": (pocet_dvere_vc + pocet_dvere_bok) * val})
+                
+            if uzamykani_segmentu:
+                val = 1500 
+                items.append({"pol": "Uzamykání segmentů", "det": "", "cen": val})
+
+            if klapka:
+                val = get_surcharge_db("klapka", is_rock)['fix'] or 7000
+                items.append({"pol": "Větrací klapka", "det": "", "cen": val})
+                
+            if vyklopne_celo:
+                val = 5000
+                items.append({"pol": "Výklopné čelo", "det": "", "cen": val})
+
+            if pochozi_koleje:
+                m_rail = (celkova_delka / 1000.0) * 2
+                items.append({"pol": "Pochozí koleje", "det": f"{m_rail:.1f} m (Standard)", "cen": 0})
+
+            if obousmerne_koleje:
+                m_rail = (celkova_delka / 1000.0) * 2
+                if pochozi_koleje_zdarma:
+                    items.append({"pol": "Obousměrné koleje", "det": "AKCE ZDARMA", "cen": 0})
+                else:
+                    val = get_surcharge_db("Pochozí kolejnice", is_rock)['fix'] or 330
+                    items.append({"pol": "Obousměrné koleje (Příplatek)", "det": f"+{m_rail:.1f} m", "cen": m_rail * val})
+
+            if ext_draha_m > 0:
+                val = get_surcharge_db("Jeden metr koleje", is_rock)['fix'] or 220
+                items.append({"pol": "Prodloužení dráhy", "det": f"+{ext_draha_m} m", "cen": ext_draha_m * val})
+                
+            if barva_koleji:
+                 items.append({"pol": f"Barva kolejí: {barva_koleji}", "det": "", "cen": 0})
+
+            mat_sum = sum(x['cen'] for x in items)
+            
+            c_montaz = 0
+            if montaz:
+                p_data = get_surcharge_db("Montáž zastřešení v ČR", is_rock)
+                val = p_data['pct'] if p_data['pct'] > 0 else 0.08
+                c_montaz = mat_sum * val
+                items.append({"pol": "Montáž (ČR)", "det": f"{val*100:.0f}% z materiálu", "cen": c_montaz})
+            
+            discount_val = 0
+            if sleva_pct > 0:
+                discount_val = mat_sum * (sleva_pct / 100.0)
+                items.append({"pol": "SLEVA", "det": f"-{sleva_pct}% (z materiálu)", "cen": -discount_val})
+            
+            c_doprava = 0 if km == 0 else km * cena_za_km
+            if km > 0: items.append({"pol": "Doprava", "det": f"{km} km x {cena_za_km} Kč", "cen": c_doprava})
+
+            total_no_vat = sum(item['cen'] for item in items)
+            dph_val = total_no_vat * (dph_sazba / 100.0)
+            total_with_vat = total_no_vat + dph_val
+
+            # VÝPIS POLOŽEK
             st.dataframe(pd.DataFrame(items), hide_index=True, use_container_width=True)
-            st.caption(f"ℹ️ {model}: odskok šířky {MODEL_PARAMS.get(model, MODEL_PARAMS['DEFAULT'])['step_w']}mm")
-        with col2:
-            st.subheader("Celkem")
-            st.metric("Bez DPH", f"{total_no_vat:,.0f} Kč")
-            st.metric(f"S DPH ({dph_sazba}%)", f"{total_with_vat:,.0f} Kč")
             
-            c_a1, c_a2 = st.columns(2)
-            with c_a1:
+            st.divider()
+            
+            # VÝPIS CELKOVÉ CENY
+            st.metric("Cena bez DPH", f"{total_no_vat:,.0f} Kč")
+            st.metric(f"Cena s DPH ({dph_sazba}%)", f"{total_with_vat:,.0f} Kč")
+            
+            col_actions1, col_actions2 = st.columns(2)
+            with col_actions1:
                 if zak_jmeno:
                     zak_udaje = {'jmeno': zak_jmeno, 'adresa': zak_adresa, 'tel': zak_tel, 'email': zak_email, 'vypracoval': vypracoval, 'datum': datum_vystaveni.strftime("%d.%m.%Y"), 'platnost': platnost_do.strftime("%d.%m.%Y"), 'termin': termin_dodani}
                     totals = {'bez_dph': total_no_vat, 'dph': dph_val, 's_dph': total_with_vat, 'sazba_dph': dph_sazba}
                     pdf_data = generate_pdf_html(zak_udaje, items, totals, model)
                     st.download_button("📄 PDF Nabídka", data=pdf_data, file_name=f"Nabidka_{zak_jmeno}.pdf", mime="application/pdf", type="primary")
-            with c_a2:
+            with col_actions2:
                 if zak_jmeno:
                     if st.button("💾 Uložit do systému"):
                         save_data = {
