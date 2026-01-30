@@ -12,8 +12,11 @@ from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, 
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy import func
 
-# --- KONFIGURACE VÝROBY ---
-POLY_OVERLAP_MM = 50 # Přesah polykarbonátu pro střechu (technologický přídavek)
+# --- KONFIGURACE VÝROBY (KALIBRACE) ---
+# O kolik mm je polykarbonát delší než modul (přesah pro upevnění)
+ROOF_OVERLAP_MM = 100 
+# Koeficient prořezu čel (0.85 = platíme 85% z opsaného obdélníku, ne celou desku)
+FACE_WASTE_COEF = 0.85 
 
 # --- DEFINICE MODELŮ A OBRÁZKŮ ---
 MODEL_PARAMS = {
@@ -101,11 +104,11 @@ def parse_value_clean(val):
     except: return 0
 
 # ########################################
-# 2. GEOMETRIE (VÝROBNÍ LOGIKA)
+# 2. GEOMETRIE (S KALIBRACÍ)
 # ########################################
 def geometry_segment_area(width_mm, height_mm):
     """
-    Vypočítá výrobní plochu (opsaný obdélník) a délku oblouku.
+    Vypočítá korigovanou výrobní plochu (opsaný obdélník * koeficient) a délku oblouku.
     """
     if width_mm <= 0: return 0, 0
     if height_mm <= 0: height_mm = 1
@@ -113,11 +116,11 @@ def geometry_segment_area(width_mm, height_mm):
     s = width_mm
     v = height_mm
     
-    # 1. Výpočet délky oblouku (pro střechu) - matematicky přesně
+    # 1. Výpočet délky oblouku
     try:
         R = ((s**2 / 4) + v**2) / (2 * v)
         if R <= 0: 
-            arc_len = s # Fallback na tětivu
+            arc_len = s
         else:
             ratio = s / (2 * R)
             if ratio > 1: ratio = 1
@@ -127,46 +130,38 @@ def geometry_segment_area(width_mm, height_mm):
     except:
         arc_len = s
 
-    # 2. Výpočet plochy pro cenu (pro čela) - VÝROBNÍ LOGIKA (Obdélník)
-    # Platí se celý obdélník, ze kterého se to vyřízne
-    production_area = (s * v) / 1_000_000 # m2
+    # 2. Výpočet plochy pro cenu
+    # Metoda: Opsaný obdélník * Koeficient prořezu (cca 0.85)
+    # Tím se dostaneme na cenu mezi čistou plochou a plným obdélníkem
+    raw_rect_area = (s * v) / 1_000_000 # m2
+    production_area = raw_rect_area * FACE_WASTE_COEF
     
     return production_area, arc_len / 1000 # m2, m
 
 def calculate_complex_geometry(model_name, width_input_mm, height_input_mm, modules, total_length_mm):
-    """
-    Počítá plochy s použitím výrobních koeficientů a přesahů.
-    """
     params = MODEL_PARAMS.get(model_name.upper(), MODEL_PARAMS["DEFAULT"])
     step_w = params["step_w"]
     step_h = params["step_h"]
 
     # --- ČELA ---
-    # Malé čelo (Nejmenší modul)
     w_small = width_input_mm
     h_small = height_input_mm
     area_face_small, arc_small = geometry_segment_area(w_small, h_small)
     
-    # Velké čelo (Největší modul)
     w_large = width_input_mm + ((modules - 1) * step_w)
     h_large = height_input_mm + ((modules - 1) * step_h)
     area_face_large, arc_large = geometry_segment_area(w_large, h_large)
     
     # --- STŘECHA ---
-    # Průměrná délka modulu
     mod_len_mm = total_length_mm / modules
-    
-    # Délka desky pro výrobu = délka modulu + přesah (50mm)
-    sheet_len_m = (mod_len_mm + POLY_OVERLAP_MM) / 1000.0
+    sheet_len_m = (mod_len_mm + ROOF_OVERLAP_MM) / 1000.0
     
     total_roof_area = 0
     for i in range(modules):
         w_i = width_input_mm + (i * step_w)
         h_i = height_input_mm + (i * step_h)
-        # Získáme délku oblouku pro tento modul
         _, arc_len_i = geometry_segment_area(w_i, h_i)
         
-        # Plocha desky = Délka oblouku * Délka desky (s přesahem)
         total_roof_area += (arc_len_i * sheet_len_m)
         
     return total_roof_area, area_face_large, area_face_small
@@ -402,12 +397,11 @@ def generate_pdf_html(zak_udaje, items, totals, model_name):
     return pdf_bytes
 
 # ########################################
-# 5. UI (STREAMLIT)
+# 5. UI
 # ########################################
 st.sidebar.title("Navigace")
 page_mode = st.sidebar.radio("Režim:", ["Kalkulátor", "Historie Nabídek"])
 
-# --- SERVISNÍ ZÓNA ---
 with st.sidebar.expander("🔐 Servisní zóna (Admin)"):
     tab_modely, tab_priplatky = st.tabs(["🏠 Ceníky Modelů", "➕ Příplatky"])
     with tab_modely:
