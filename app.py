@@ -16,18 +16,6 @@ from sqlalchemy import func
 ROOF_OVERLAP_MM = 100 
 FACE_WASTE_COEF = 0.85 
 
-# --- CENÍK PRODLOUŽENÍ KOLEJÍ (UNIVERZÁLNÍ) ---
-# Hodnoty z prvních řádků ceníku (Cena za prodloužení kolejí o délku jednoho modulu)
-# Klíč = počet modulů, Hodnota = Cena v Kč
-RAIL_EXTENSION_PRICES = {
-    2: 910,
-    3: 2730,
-    4: 5460,
-    5: 9100,
-    6: 13650,
-    7: 19106
-}
-
 # --- DEFINICE MODELŮ A OBRÁZKŮ ---
 MODEL_PARAMS = {
     "PRACTIC":  {"step_w": 100, "step_h": 50, "img": "practic.png"},
@@ -150,13 +138,17 @@ def calculate_complex_geometry(model_name, width_input_mm, height_input_mm, modu
     sheet_len_m = (mod_len_mm + ROOF_OVERLAP_MM) / 1000.0
     
     total_roof_area = 0
+    total_arc_len_m = 0
+    
     for i in range(modules):
         w_i = width_input_mm + (i * step_w)
         h_i = height_input_mm + (i * step_h)
         _, arc_len_i = geometry_segment_area(w_i, h_i)
-        total_roof_area += (arc_len_i * sheet_len_m)
         
-    return total_roof_area, area_face_large, area_face_small
+        total_roof_area += (arc_len_i * sheet_len_m)
+        total_arc_len_m += arc_len_i
+        
+    return total_roof_area, area_face_large, area_face_small, total_arc_len_m
 
 def get_surcharge_db(search_term, is_rock=False):
     if not SessionLocal: return {"fix": 0, "pct": 0}
@@ -193,42 +185,6 @@ def calculate_base_price_db(model, width_mm, modules):
             return 0, 0, "Rozměr nebo počet modulů nenalezen"
     except Exception as e:
         return 0,0, str(e)
-    finally:
-        session.close()
-
-# UNIVERZÁLNÍ VÝPOČET PRODLOUŽENÍ (Konstrukce + Koleje)
-def calculate_extension_price_dynamic_universal(model, width_mm, modules):
-    """
-    Vypočítá kompletní cenu za 1 metr prodloužení (Konstrukce + Koleje).
-    """
-    if not SessionLocal: return 0
-    session = SessionLocal()
-    try:
-        # 1. Cena Konstrukce (rozdíl cen modulů)
-        row_curr = session.query(Cenik).filter(Cenik.model == model, Cenik.moduly == modules, Cenik.sirka_mm >= width_mm).order_by(Cenik.sirka_mm.asc()).first()
-        row_next = session.query(Cenik).filter(Cenik.model == model, Cenik.moduly == modules + 1, Cenik.sirka_mm >= width_mm).order_by(Cenik.sirka_mm.asc()).first()
-        
-        # Standardní délka modulu
-        mod_len = 2110.0 
-        
-        structure_price_per_m = 0
-        if row_curr and row_next:
-            price_diff = row_next.cena - row_curr.cena
-            structure_price_per_m = price_diff / (mod_len / 1000.0)
-        else:
-            # Fallback
-            row_prev = session.query(Cenik).filter(Cenik.model == model, Cenik.moduly == modules - 1, Cenik.sirka_mm >= width_mm).order_by(Cenik.sirka_mm.asc()).first()
-            if row_curr and row_prev:
-                price_diff = row_curr.cena - row_prev.cena
-                structure_price_per_m = price_diff / (mod_len / 1000.0)
-        
-        # 2. Cena Kolejí (z univerzální tabulky RAIL_EXTENSION_PRICES)
-        rail_price_total = RAIL_EXTENSION_PRICES.get(modules, 0)
-        rail_price_per_m = rail_price_total / (mod_len / 1000.0)
-        
-        # Celková cena za metr
-        return structure_price_per_m + rail_price_per_m
-        
     finally:
         session.close()
 
@@ -641,22 +597,23 @@ else:
         avg_mod_len = int(celkova_delka / moduly)
         items.append({"pol": f"Zastřešení {model}", "det": f"{moduly} seg., Š: {sirka}mm ({avg_mod_len} mm/mod)", "cen": base_price})
         
+        # PRODLOUŽENÍ (VÝPOČET)
+        roof_a, face_a_large, face_a_small, total_arc_len_m = calculate_complex_geometry(model, sirka, height, moduly, celkova_delka)
+        
         if diff_len > 10:
-            # UNIVERZÁLNÍ LOGIKA (Cena konstrukce + Cena kolejí + Fix)
-            price_per_m_total = calculate_extension_price_dynamic_universal(model, sirka, moduly)
+            # 1. FIX: Počet modulů * 3000 (Cena z DB "Prodloužení modulu")
+            p_fix_mod = get_surcharge_db("Prodloužení modulu", is_rock)
+            fix_price = p_fix_mod['fix'] if p_fix_mod['fix'] > 0 else 3000
+            total_fix = pocet_prod_modulu * fix_price
             
-            # Fixní poplatek (cca 5000)
-            # Můžeme použít buď hodnotu z DB nebo natvrdo 5000, pokud v DB chybí
-            p_fix_atyp = get_surcharge_db("Atypická délka", is_rock) # Zkusíme najít obecný Atyp fix
-            p_fix_mod = get_surcharge_db("Prodloužení modulu", is_rock) # Nebo prodloužení
+            # 2. VAR: Polovina délky oblouků * Prodloužení (m) * 2000 (Cena z DB "Prodloužení modulu za metr")
+            p_var_mat = get_surcharge_db("Prodloužení modulu za metr", is_rock)
+            mat_price_unit = p_var_mat['fix'] if p_var_mat['fix'] > 0 else 2000
             
-            # Logika pro fix: 
-            # V Excelu to vychází na cca 3000 (fix) + 2000 (modul) * počet modulů? 
-            # Nebo spíš paušál 5000 celkem za celou úpravu? 
-            # Dle analýzy to vypadá na paušál 5000 Kč + cena materiálu.
-            fix_cost = 5000 
+            # Vzorec: (Celková délka oblouků / 2) * (Prodloužení v metrech) * Cena
+            total_var = (total_arc_len_m / 2) * (diff_len / 1000.0) * mat_price_unit
             
-            total_extension_cost = ((diff_len / 1000.0) * price_per_m_total) + fix_cost
+            total_extension_cost = total_fix + total_var
             
             items.append({
                 "pol": f"Prodloužení {pocet_prod_modulu} modulů (Atyp)", 
@@ -686,7 +643,6 @@ else:
             val = p_data['pct'] if p_data['pct'] > 0 else 0.05
             items.append({"pol": "Příplatek Antracit", "det": f"{val*100:.0f}%", "cen": base_price * val})
 
-        roof_a, face_a_large, face_a_small = calculate_complex_geometry(model, sirka, height, moduly, celkova_delka)
         p_data = get_surcharge_db("Plný polykarbonát", is_rock)
         poly_p = p_data['fix'] if p_data['fix'] > 10 else 1000
         
