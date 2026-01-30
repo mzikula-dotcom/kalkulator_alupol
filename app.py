@@ -14,7 +14,7 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy import func
 
 # --- VERZE APLIKACE ---
-APP_VERSION = "54.0 (Fix Admin & Layout)"
+APP_VERSION = "54.1 (Fix st.rerun)"
 
 # --- HESLO ADMINA ---
 ADMIN_PASSWORD = "admin123"
@@ -196,7 +196,11 @@ def calculate_base_price_db(model, width_mm, modules):
     try:
         count = session.query(Cenik).filter(Cenik.model == model).count()
         if count == 0: return 0, 0, f"Ceník pro {model} je prázdný!"
-        row = session.query(Cenik).filter(Cenik.model == model, Cenik.moduly == modules, Cenik.sirka_mm >= width_mm).order_by(Cenik.sirka_mm.asc()).first()
+        row = session.query(Cenik).filter(
+            Cenik.model == model,
+            Cenik.moduly == modules,
+            Cenik.sirka_mm >= width_mm
+        ).order_by(Cenik.sirka_mm.asc()).first()
         if row: return row.cena, row.vyska * 1000, None
         else:
             max_row = session.query(Cenik).filter(Cenik.model == model, Cenik.moduly == modules).order_by(Cenik.sirka_mm.desc()).first()
@@ -257,15 +261,12 @@ def delete_offer(offer_id):
             session.commit()
     finally: session.close()
 
-# OPRAVENÁ FUNKCE PRO UPDATE DATABÁZE
 def update_priplatek_db(edited_df):
     if not SessionLocal: return
     session = SessionLocal()
     try:
-        # Převedeme editor dataframe na seznam slovníků pro bezpečnější iteraci
         records = edited_df.to_dict('records')
         for row in records:
-            # Hledáme podle ID
             item = session.query(Priplatek).filter(Priplatek.id == row['id']).first()
             if item:
                 item.nazev = row['nazev']
@@ -450,14 +451,14 @@ with st.sidebar:
             if st.button("Přihlásit"):
                 if pwd == ADMIN_PASSWORD:
                     st.session_state['admin_logged_in'] = True
-                    st.experimental_rerun()
+                    st.rerun()
                 else:
                     st.error("Chybné heslo")
         else:
             st.success("Přihlášen jako Admin")
             if st.button("Odhlásit"):
                 st.session_state['admin_logged_in'] = False
-                st.experimental_rerun()
+                st.rerun()
 
 # --------------------------
 # ZOBRAZENÍ: KALKULÁTOR
@@ -796,4 +797,4 @@ elif app_mode == "🔧 Admin Mód":
             with col_del2:
                 if st.button("🗑️ Smazat nabídku"):
                     delete_offer(del_id)
-                    st.experimental_rerun()
+                    st.rerun()
