@@ -14,7 +14,7 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy import func
 
 # --- VERZE APLIKACE ---
-APP_VERSION = "56.0 (Compact Sidebar)"
+APP_VERSION = "57.0 (Restore Load Feature)"
 
 # --- HESLO ADMINA ---
 ADMIN_PASSWORD = "admin123"
@@ -55,17 +55,9 @@ st.set_page_config(page_title=f"Rentmil v{APP_VERSION}", layout="wide", page_ico
 # CSS - Kompaktnější vzhled + ZÚŽENÍ SIDEBARU
 st.markdown("""
     <style>
-        /* Zmenšení paddingu pro hlavní obsah */
         .block-container {padding-top: 1rem; padding-bottom: 2rem; padding-left: 2rem; padding-right: 2rem;}
         h1 {padding-top: 0rem;}
-        
-        /* ZÚŽENÍ POSTRANNÍHO PANELU (SIDEBAR) */
-        [data-testid="stSidebar"] {
-            min-width: 260px;
-            max-width: 260px;
-        }
-        
-        /* Stylování karet a expanderů */
+        [data-testid="stSidebar"] {min-width: 260px; max-width: 260px;}
         .metric-card {background-color: #f0f2f6; padding: 15px; border-radius: 10px; border-left: 5px solid #004b96;}
         div[data-testid="stExpander"] div[role="button"] p {font-size: 1.1rem; font-weight: bold; color: #004b96;}
     </style>
@@ -801,10 +793,22 @@ elif app_mode == "🔧 Admin Mód":
         if not df_nabidky.empty:
             st.dataframe(df_nabidky[['id', 'datum_vytvoreni', 'zakaznik', 'model', 'cena_celkem', 'vypracoval']], use_container_width=True)
             
-            col_del1, col_del2 = st.columns([3, 1])
-            with col_del1:
-                del_id = st.selectbox("Smazat ID:", df_nabidky['id'])
-            with col_del2:
+            col_sel, col_load, col_del = st.columns([2, 1, 1])
+            with col_sel:
+                del_id = st.selectbox("Vyber ID:", df_nabidky['id'])
+            with col_load:
+                if st.button("📂 Načíst do kalkulátoru"):
+                    offer_to_load = next((n for idx, n in df_nabidky.iterrows() if n['id'] == del_id), None)
+                    # Note: df_nabidky is a DataFrame, need to fetch object or parse DF row
+                    if offer_to_load is not None:
+                        # Fetch pure object from DB for clean JSON
+                        session = SessionLocal()
+                        db_offer = session.query(Nabidka).filter(Nabidka.id == int(del_id)).first()
+                        if db_offer:
+                            st.session_state['form_data'] = json.loads(db_offer.data_json)
+                            st.toast("Načteno! Přejděte do kalkulátoru.", icon="✅")
+                        session.close()
+            with col_del:
                 if st.button("🗑️ Smazat nabídku"):
                     delete_offer(del_id)
                     st.rerun()
