@@ -14,7 +14,7 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy import func
 
 # --- VERZE APLIKACE ---
-APP_VERSION = "57.0 (Restore Load Feature)"
+APP_VERSION = "58.0 (Shortening Logic)"
 
 # --- HESLO ADMINA ---
 ADMIN_PASSWORD = "admin123"
@@ -22,6 +22,7 @@ ADMIN_PASSWORD = "admin123"
 # --- KONFIGURACE VÝROBY ---
 ROOF_OVERLAP_MM = 100 
 FACE_WASTE_COEF = 0.85 
+MIN_MODULE_LEN_MM = 1800 # Minimální délka segmentu
 
 # --- ZÁLOŽNÍ HODNOTY ---
 DEFAULT_RAIL_PRICES = {2: 910, 3: 2730, 4: 5460, 5: 9100, 6: 13650, 7: 19106}
@@ -52,7 +53,7 @@ except ImportError:
 
 st.set_page_config(page_title=f"Rentmil v{APP_VERSION}", layout="wide", page_icon="🏊‍♂️")
 
-# CSS - Kompaktnější vzhled + ZÚŽENÍ SIDEBARU
+# CSS Styling
 st.markdown("""
     <style>
         .block-container {padding-top: 1rem; padding-bottom: 2rem; padding-left: 2rem; padding-right: 2rem;}
@@ -513,10 +514,17 @@ if app_mode == "Kalkulátor":
             std_len = STD_LENGTHS.get(moduly, moduly * 2190)
             celkova_delka = st.number_input(f"Délka (std {std_len})", 2000, 20000, get_val('celkova_delka', std_len), step=10)
         
+        # LOGIKA ZKRÁCENÍ / PRODLOUŽENÍ
         diff_len = celkova_delka - std_len
         if diff_len > 10:
             pocet_prod_modulu = st.number_input("Počet prodloužených modulů", 1, moduly, get_val('pocet_prod_modulu', 1))
-        else: pocet_prod_modulu = 1
+        else: 
+            pocet_prod_modulu = 1
+            
+        # CHECKER: MINIMÁLNÍ DÉLKA MODULU
+        avg_mod_len = celkova_delka / moduly
+        if avg_mod_len < MIN_MODULE_LEN_MM:
+            st.warning(f"⚠️ Pozor! Průměrná délka segmentu {avg_mod_len:.0f} mm je pod limitem {MIN_MODULE_LEN_MM} mm.")
 
         st.subheader("2. Barvy a Polykarbonát")
         c_b1, c_b2 = st.columns(2)
@@ -599,9 +607,13 @@ if app_mode == "Kalkulátor":
                 factor_val = get_poly_factor_from_db()
                 var_cost = (total_arc_len_mm * factor_val) * (diff_len / 1000000.0) * val_fix2
                 items.append({"pol": f"Prodloužení {pocet_prod_modulu} mod.", "det": f"+{diff_len} mm", "cen": fix_cost + var_cost})
+            
+            # --- ZKRÁCENÍ (NOVÁ LOGIKA) ---
             elif diff_len < -10:
-                 p_zkrac = get_surcharge_db("Zkrácení", is_rock)
-                 items.append({"pol": "Zkrácení", "det": f"{diff_len} mm", "cen": p_zkrac['fix'] or 1500})
+                 p_zkrac = get_surcharge_db("Zkrácení modulu", is_rock)
+                 price_per_mod = p_zkrac['fix'] if p_zkrac['fix'] > 0 else 2000
+                 total_shortening_cost = moduly * price_per_mod
+                 items.append({"pol": f"Zkrácení zastřešení ({moduly} mod.)", "det": f"{diff_len} mm", "cen": total_shortening_cost})
 
             if "Stříbrný" in barva_typ: items.append({"pol": "BONUS: Stříbrný Elox", "det": "-10%", "cen": base_price * -0.10})
             elif "RAL" in barva_typ: 
@@ -799,9 +811,7 @@ elif app_mode == "🔧 Admin Mód":
             with col_load:
                 if st.button("📂 Načíst do kalkulátoru"):
                     offer_to_load = next((n for idx, n in df_nabidky.iterrows() if n['id'] == del_id), None)
-                    # Note: df_nabidky is a DataFrame, need to fetch object or parse DF row
                     if offer_to_load is not None:
-                        # Fetch pure object from DB for clean JSON
                         session = SessionLocal()
                         db_offer = session.query(Nabidka).filter(Nabidka.id == int(del_id)).first()
                         if db_offer:
