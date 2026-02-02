@@ -14,7 +14,7 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy import func
 
 # --- VERZE APLIKACE ---
-APP_VERSION = "58.0 (Shortening Logic)"
+APP_VERSION = "59.0 (Fixed Shortening)"
 
 # --- HESLO ADMINA ---
 ADMIN_PASSWORD = "admin123"
@@ -22,7 +22,7 @@ ADMIN_PASSWORD = "admin123"
 # --- KONFIGURACE VÝROBY ---
 ROOF_OVERLAP_MM = 100 
 FACE_WASTE_COEF = 0.85 
-MIN_MODULE_LEN_MM = 1800 # Minimální délka segmentu
+MIN_MODULE_LEN_MM = 1800 
 
 # --- ZÁLOŽNÍ HODNOTY ---
 DEFAULT_RAIL_PRICES = {2: 910, 3: 2730, 4: 5460, 5: 9100, 6: 13650, 7: 19106}
@@ -613,7 +613,7 @@ if app_mode == "Kalkulátor":
                  p_zkrac = get_surcharge_db("Zkrácení modulu", is_rock)
                  price_per_mod = p_zkrac['fix'] if p_zkrac['fix'] > 0 else 2000
                  total_shortening_cost = moduly * price_per_mod
-                 items.append({"pol": f"Zkrácení zastřešení ({moduly} mod.)", "det": f"{diff_len} mm", "cen": total_shortening_cost})
+                 items.append({"pol": f"Zkrácení zastřešení (Atyp)", "det": f"{moduly} ks x {price_per_mod:,.0f} Kč (Paušál)", "cen": total_shortening_cost})
 
             if "Stříbrný" in barva_typ: items.append({"pol": "BONUS: Stříbrný Elox", "det": "-10%", "cen": base_price * -0.10})
             elif "RAL" in barva_typ: 
