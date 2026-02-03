@@ -14,7 +14,7 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy import func
 
 # --- VERZE APLIKACE ---
-APP_VERSION = "66.1 (Hotfix - Geometry Return Values)"
+APP_VERSION = "66.2 (Remove Azure + Hotfix)"
 
 # --- HESLO ADMINA ---
 ADMIN_PASSWORD = "admin123"
@@ -25,8 +25,10 @@ FACE_WASTE_COEF = 0.85
 MIN_MODULE_LEN_MM = 1800 
 STANDARD_MODULE_LEN_MM = 2190
 
-# --- ZÁLOŽNÍ HODNOTY ---
-DEFAULT_RAIL_PRICES = {2: 910, 3: 2730, 4: 5460, 5: 9100, 6: 13650, 7: 19106}
+# --- KATEGORIE MODELŮ (GEOMETRIE) ---
+# Seznam modelů, které mají hranatý/lomený tvar (ne oblouk)
+# Azure odstraněno - jiný výrobce
+ANGULAR_MODELS = ["FLASH", "WING", "DREAM", "TERRACE"]
 
 # --- DEFINICE MODELŮ ---
 MODEL_PARAMS = {
