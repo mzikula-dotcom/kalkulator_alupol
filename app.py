@@ -14,7 +14,7 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy import func
 
 # --- VERZE APLIKACE ---
-APP_VERSION = "66.0 (Rails Logic Fix)"
+APP_VERSION = "66.1 (Hotfix - Geometry Return Values)"
 
 # --- HESLO ADMINA ---
 ADMIN_PASSWORD = "admin123"
@@ -120,8 +120,9 @@ def parse_value_clean(val):
     try: return float(s.replace(',', '.'))
     except: return 0
 
-def geometry_segment_area(width_mm, height_mm):
-    if width_mm <= 0: return 0, 0
+def geometry_segment_values(width_mm, height_mm):
+    """Vrací (Plocha_pro_výrobu, Délka_oblouku_mm, Čistá_geometrická_plocha)"""
+    if width_mm <= 0: return 0, 0, 0
     if height_mm <= 0: height_mm = 1
     s = width_mm
     v = height_mm
@@ -135,36 +136,42 @@ def geometry_segment_area(width_mm, height_mm):
             alpha_rad = 2 * math.asin(ratio)
             arc_len = alpha_rad * R
     except: arc_len = s
+
     raw_rect_area = (s * v) / 1_000_000 
-    production_area = raw_rect_area * FACE_WASTE_COEF
-    return production_area, arc_len / 1000
+    production_area = raw_rect_area * FACE_WASTE_COEF # Pouze pro čela
+    return production_area, arc_len, raw_rect_area
 
 def calculate_complex_geometry_v2(model_name, width_input_mm, height_input_mm, modules, total_length_mm):
     params = MODEL_PARAMS.get(model_name.upper(), MODEL_PARAMS["DEFAULT"])
     step_w = params["step_w"]
     step_h = params["step_h"]
+
+    # Čela (s odpadem)
     w_small = width_input_mm
     h_small = height_input_mm
-    area_face_small, _ = geometry_segment_area(w_small, h_small)
+    area_face_small, _, _ = geometry_segment_values(w_small, h_small)
+    
     w_large = width_input_mm + ((modules - 1) * step_w)
     h_large = height_input_mm + ((modules - 1) * step_h)
-    area_face_large, _ = geometry_segment_area(w_large, h_large)
+    area_face_large, _, _ = geometry_segment_values(w_large, h_large)
     
-    # Pro střechu používáme čistou geometrickou plochu, bez odpadu
+    # Střecha (bez odpadu, čistá geometrie)
     mod_len_mm = total_length_mm / modules
     sheet_len_m = (mod_len_mm + ROOF_OVERLAP_MM) / 1000.0
+    
     total_roof_area_geometric = 0
+    total_arc_len_mm = 0 
     
     for i in range(modules):
         w_i = width_input_mm + (i * step_w)
         h_i = height_input_mm + (i * step_h)
-        _, arc_len_i_m = geometry_segment_area(w_i, h_i) # Zde vrací s odpadem, musíme upravit
-        # Pro přesný výpočet bychom potřebovali čistou délku oblouku, ale pro účely plochy polykarbonátu
-        # je stávající funkce dostačující, protože se používá pro ceníkovou položku polykarbonátu.
-        # Důležité: Tuto funkci používáme JEN pro plochu polykarbonátu, ne pro cenu prodloužení.
-        total_roof_area_geometric += (arc_len_i_m) * sheet_len_m # arc_len_i_m je už v metrech
+        _, arc_len_i_mm, _ = geometry_segment_values(w_i, h_i)
         
-    return total_roof_area_geometric, area_face_large, area_face_small
+        # Geometrická plocha = délka oblouku * délka modulu (vč. překryvu)
+        total_roof_area_geometric += (arc_len_i_mm / 1000.0) * sheet_len_m
+        total_arc_len_mm += arc_len_i_mm
+        
+    return total_roof_area_geometric, area_face_large, area_face_small, total_arc_len_mm
 
 def get_surcharge_db(search_term, is_rock=False):
     if not SessionLocal: return {"fix": 0, "pct": 0}
@@ -177,6 +184,16 @@ def get_surcharge_db(search_term, is_rock=False):
         if item:
             return {"fix": item.cena_fix or 0, "pct": item.cena_pct or 0}
         return {"fix": 0, "pct": 0}
+    finally: session.close()
+
+def get_rail_price_from_db(modules):
+    if not SessionLocal: return DEFAULT_RAIL_PRICES.get(modules, 0)
+    session = SessionLocal()
+    try:
+        search_name = f"Koleje prodloužení {modules} mod"
+        item = session.query(Priplatek).filter(Priplatek.nazev.ilike(f"%{search_name}%")).first()
+        if item and item.cena_fix > 0: return item.cena_fix
+        else: return DEFAULT_RAIL_PRICES.get(modules, 0)
     finally: session.close()
 
 def calculate_base_price_db(model, width_mm, modules):
@@ -225,7 +242,14 @@ def save_offer_to_db(data_dict, total_price):
     session = SessionLocal()
     try:
         json_str = json.dumps(data_dict, default=str)
-        nova_nabidka = Nabidka(zakaznik=data_dict.get('zak_jmeno', 'Neznámý'), model=data_dict.get('model', '-'), cena_celkem=total_price, data_json=json_str, datum_vytvoreni=datetime.now())
+        obchodnik = data_dict.get('vypracoval', 'Neznámý')
+        nova_nabidka = Nabidka(
+            zakaznik=data_dict.get('zak_jmeno', 'Neznámý'), 
+            model=data_dict.get('model', '-'), 
+            cena_celkem=total_price, 
+            data_json=json_str, 
+            datum_vytvoreni=datetime.now()
+        )
         session.add(nova_nabidka)
         session.commit()
         return True, "Uloženo."
@@ -564,24 +588,19 @@ if app_mode == "Kalkulátor":
                 steps = zvyseni_cm / 10
                 items.append({"pol": f"Zvýšení o {zvyseni_cm} cm", "det": f"+{pct_per_10cm * steps * 100:.0f}%", "cen": base_price * pct_per_10cm * steps})
 
+            # VOLÁNÍ FUNKCE, KTERÁ BYLA OPRAVENA:
             roof_a_geo, face_a_large, face_a_small, _ = calculate_complex_geometry_v2(model, sirka, height, moduly, celkova_delka)
             
             if diff_len > 10:
-                # 1. CENA MATERIÁLU Z CENÍKU (Interpolace)
                 interpolated_price_per_mm = get_price_per_mm_from_db(model, sirka, moduly)
                 if interpolated_price_per_mm <= 0: interpolated_price_per_mm = 10 
                 
-                # Zde už je obsažena konstrukce, polykarbonát (dutinka) i standardní koleje
                 material_cost = diff_len * interpolated_price_per_mm
                 
-                # 2. FIXNÍ POPLATEK ZA ATYP (PRÁCE)
                 p_atyp_fix = get_surcharge_db("Prodloužení modulu", is_rock)
                 atyp_fee = p_atyp_fix['fix'] if p_atyp_fix['fix'] > 0 else 3000
                 total_fix_fee = pocet_prod_modulu * atyp_fee
                 
-                # 3. KOREKCE KOLEJÍ (POUZE DOPLATEK ZA NADSTANDARD)
-                # Pokud jsou koleje zdarma -> žádný doplatek.
-                # Pokud nejsou zdarma a jsou lepší než standard -> doplatek rozdílu.
                 rail_surcharge = 0
                 if (pochozi_koleje or obousmerne_koleje) and not pochozi_koleje_zdarma:
                     p_std = get_surcharge_db("Jeden metr koleje", is_rock)
@@ -590,7 +609,6 @@ if app_mode == "Kalkulátor":
                     std_price = p_std['fix'] if p_std['fix'] > 0 else 220
                     prem_price = p_premium['fix'] if p_premium['fix'] > 0 else 330
                     
-                    # Doplatek je rozdíl mezi tím, co už je v ceně (Standard), a tím, co chce klient (Premium)
                     diff_per_m = max(0, prem_price - std_price)
                     rail_surcharge = (diff_len / 1000.0) * 2 * diff_per_m
 
