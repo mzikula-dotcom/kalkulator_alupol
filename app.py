@@ -14,7 +14,7 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy import func
 
 # --- VERZE APLIKACE ---
-APP_VERSION = "59.0 (Fixed Shortening)"
+APP_VERSION = "61.0 (Angular Geometry Fix)"
 
 # --- HESLO ADMINA ---
 ADMIN_PASSWORD = "admin123"
@@ -27,6 +27,11 @@ MIN_MODULE_LEN_MM = 1800
 # --- ZÁLOŽNÍ HODNOTY ---
 DEFAULT_RAIL_PRICES = {2: 910, 3: 2730, 4: 5460, 5: 9100, 6: 13650, 7: 19106}
 DEFAULT_POLY_FACTOR = 0.394
+
+# --- KATEGORIE MODELŮ (GEOMETRIE) ---
+# ARCH = Oblouk (počítá se jako segment kruhu)
+# ANGULAR = Hranaté/Nízké (počítá se úsporněji - korekce 0.8)
+ANGULAR_MODELS = ["FLASH", "WING", "DREAM", "AZURE", "TERRACE"]
 
 # --- DEFINICE MODELŮ ---
 MODEL_PARAMS = {
@@ -521,6 +526,9 @@ if app_mode == "Kalkulátor":
         else: 
             pocet_prod_modulu = 1
             
+        # ZVÝŠENÍ
+        zvyseni_cm = st.number_input("Zvýšení zastřešení (po 10 cm)", 0, 50, get_val('zvyseni_cm', 0), step=10)
+            
         # CHECKER: MINIMÁLNÍ DÉLKA MODULU
         avg_mod_len = celkova_delka / moduly
         if avg_mod_len < MIN_MODULE_LEN_MM:
@@ -596,6 +604,17 @@ if app_mode == "Kalkulátor":
             items = []
             items.append({"pol": f"Zastřešení {model}", "det": f"{moduly} seg., Š:{sirka}mm", "cen": base_price})
             
+            # --- ZVÝŠENÍ ---
+            if zvyseni_cm > 0:
+                p_zvyseni = get_surcharge_db("Zvýšení zastřešení", is_rock)
+                def_pct = 0.02 if is_rock else 0.03
+                pct_per_10cm = p_zvyseni['pct'] if p_zvyseni['pct'] > 0 else def_pct
+                
+                steps = zvyseni_cm / 10
+                total_zvyseni_pct = pct_per_10cm * steps
+                cost_zvyseni = base_price * total_zvyseni_pct
+                items.append({"pol": f"Zvýšení o {zvyseni_cm} cm", "det": f"+{total_zvyseni_pct*100:.0f}%", "cen": cost_zvyseni})
+
             roof_a, face_a_large, face_a_small, total_arc_len_mm = calculate_complex_geometry(model, sirka, height, moduly, celkova_delka)
             if diff_len > 10:
                 p_fix_mod = get_surcharge_db("Prodloužení modulu", is_rock)
@@ -604,11 +623,17 @@ if app_mode == "Kalkulátor":
                 val_fix2 = p_var_mat['fix'] if p_var_mat['fix'] > 0 else 2000
                 
                 fix_cost = (pocet_prod_modulu * val_fix1)
+                
+                # GEOMETRICKÁ KOREKCE (ANGULAR vs ARCH)
+                # Pokud je model v seznamu ANGULAR_MODELS (Flash, Wing...),
+                # aplikujeme korekci 0.80 pro reálnější cenu (méně materiálu než oblouk).
+                geometry_pricing_factor = 0.80 if model.upper() in ANGULAR_MODELS or is_rock else 1.0
+                
                 factor_val = get_poly_factor_from_db()
-                var_cost = (total_arc_len_mm * factor_val) * (diff_len / 1000000.0) * val_fix2
+                var_cost = (total_arc_len_mm * factor_val * geometry_pricing_factor) * (diff_len / 1000000.0) * val_fix2
                 items.append({"pol": f"Prodloužení {pocet_prod_modulu} mod.", "det": f"+{diff_len} mm", "cen": fix_cost + var_cost})
             
-            # --- ZKRÁCENÍ (NOVÁ LOGIKA) ---
+            # --- ZKRÁCENÍ ---
             elif diff_len < -10:
                  p_zkrac = get_surcharge_db("Zkrácení modulu", is_rock)
                  price_per_mod = p_zkrac['fix'] if p_zkrac['fix'] > 0 else 2000
@@ -699,7 +724,7 @@ if app_mode == "Kalkulátor":
             c_btn1, c_btn2 = st.columns(2)
             with c_btn1:
                 if zak_jmeno:
-                    zak_udaje = {'jmeno': zak_jmeno, 'adresa': zak_adresa, 'tel': zak_tel, 'email': zak_email, 'vypracoval': vypracoval, 'datum': datum_vystaveni.strftime("%d.%m.%Y"), 'platnost': platnost_do.strftime("%d.%m.%Y"), 'termin': termin_dodani}
+                    zak_udaje = {'jmeno': zak_jmeno, 'adresa': zak_adresa, 'tel': zak_tel, 'email': zak_email, 'vypracoval': vypracoval, 'datum': datum_vystaveni.strftime("%d.%m.%Y"), 'platnost': platnost_do.strftime("%d.%m.%Y"), 'termin': termin_dodani, 'zvyseni_cm': zvyseni_cm}
                     totals = {'bez_dph': total_no_vat, 'dph': total_vat-total_no_vat, 's_dph': total_vat, 'sazba_dph': dph_sazba}
                     pdf_data = generate_pdf_html(zak_udaje, items, totals, model)
                     st.download_button("📄 PDF", data=pdf_data, file_name=f"Nabidka_{zak_jmeno}.pdf", mime="application/pdf", type="primary", use_container_width=True)
@@ -707,7 +732,7 @@ if app_mode == "Kalkulátor":
                 if zak_jmeno:
                     if st.button("💾 Uložit", use_container_width=True):
                         save_data = st.session_state.get('form_data', {}).copy()
-                        save_data.update({'zak_jmeno': zak_jmeno, 'model': model, 'vypracoval': vypracoval})
+                        save_data.update({'zak_jmeno': zak_jmeno, 'model': model, 'vypracoval': vypracoval, 'zvyseni_cm': zvyseni_cm})
                         success, msg = save_offer_to_db(save_data, total_vat)
                         if success: st.success("OK")
                         else: st.error(msg)
