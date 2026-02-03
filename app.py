@@ -14,7 +14,7 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy import func
 
 # --- VERZE APLIKACE ---
-APP_VERSION = "62.0 (Decoupled Extension Logic)"
+APP_VERSION = "63.0 (Dynamic Price Interpolation)"
 
 # --- HESLO ADMINA ---
 ADMIN_PASSWORD = "admin123"
@@ -23,11 +23,10 @@ ADMIN_PASSWORD = "admin123"
 ROOF_OVERLAP_MM = 100 
 FACE_WASTE_COEF = 0.85 
 MIN_MODULE_LEN_MM = 1800 
+STANDARD_MODULE_LEN_MM = 2190 # Průměrná délka modulu pro výpočet ceny
 
-# --- KATEGORIE MODELŮ (GEOMETRIE) ---
-# ARCH = Oblouk (Practic, Classic...)
-# ANGULAR = Hranaté (Flash, Wing, Dream...) - mají menší reálnou plochu střechy
-ANGULAR_MODELS = ["FLASH", "WING", "DREAM", "AZURE", "TERRACE"]
+# --- ZÁLOŽNÍ HODNOTY ---
+DEFAULT_RAIL_PRICES = {2: 910, 3: 2730, 4: 5460, 5: 9100, 6: 13650, 7: 19106}
 
 # --- DEFINICE MODELŮ ---
 MODEL_PARAMS = {
@@ -175,6 +174,16 @@ def get_surcharge_db(search_term, is_rock=False):
         return {"fix": 0, "pct": 0}
     finally: session.close()
 
+def get_rail_price_from_db(modules):
+    if not SessionLocal: return DEFAULT_RAIL_PRICES.get(modules, 0)
+    session = SessionLocal()
+    try:
+        search_name = f"Koleje prodloužení {modules} mod"
+        item = session.query(Priplatek).filter(Priplatek.nazev.ilike(f"%{search_name}%")).first()
+        if item and item.cena_fix > 0: return item.cena_fix
+        else: return DEFAULT_RAIL_PRICES.get(modules, 0)
+    finally: session.close()
+
 def calculate_base_price_db(model, width_mm, modules):
     if not SessionLocal: return 0,0, "DB Error"
     session = SessionLocal()
@@ -193,6 +202,34 @@ def calculate_base_price_db(model, width_mm, modules):
             return 0, 0, "Rozměr nebo počet modulů nenalezen"
     except Exception as e: return 0,0, str(e)
     finally: session.close()
+
+# NOVÁ KLÍČOVÁ FUNKCE: Vypočítá cenu za metr prodloužení přímo z ceníku
+def calculate_interpolated_extension_price(model, width_mm, modules):
+    if not SessionLocal: return 0
+    session = SessionLocal()
+    try:
+        # 1. Najdi cenu pro aktuální počet modulů (např. 3)
+        row_curr = session.query(Cenik).filter(Cenik.model == model, Cenik.moduly == modules, Cenik.sirka_mm >= width_mm).order_by(Cenik.sirka_mm.asc()).first()
+        
+        # 2. Najdi cenu pro vyšší počet modulů (např. 4)
+        row_next = session.query(Cenik).filter(Cenik.model == model, Cenik.moduly == modules + 1, Cenik.sirka_mm >= width_mm).order_by(Cenik.sirka_mm.asc()).first()
+        
+        # Pokud neexistuje vyšší (jsme na 7 modulech), zkusíme nižší
+        if not row_next:
+             row_prev = session.query(Cenik).filter(Cenik.model == model, Cenik.moduly == modules - 1, Cenik.sirka_mm >= width_mm).order_by(Cenik.sirka_mm.asc()).first()
+             if row_curr and row_prev:
+                 delta_price = row_curr.cena - row_prev.cena
+             else:
+                 return 0 # Nelze spočítat
+        else:
+             delta_price = row_next.cena - row_curr.cena
+        
+        # Cena za 1 mm délky zastřešení (konstrukce + poly + koleje ve standardu)
+        price_per_mm = delta_price / STANDARD_MODULE_LEN_MM
+        return price_per_mm
+        
+    finally:
+        session.close()
 
 def save_offer_to_db(data_dict, total_price):
     if not SessionLocal: return False, "DB Error"
@@ -548,39 +585,26 @@ if app_mode == "Kalkulátor":
             roof_a, face_a_large, face_a_small, total_arc_len_mm = calculate_complex_geometry(model, sirka, height, moduly, celkova_delka)
             
             if diff_len > 10:
-                p_var_mat = get_surcharge_db("Prodloužení modulu za metr", is_rock)
-                price_profiles_linear = p_var_mat['fix'] if p_var_mat['fix'] > 0 else 2000
+                # DYNAMICKÁ CENA (Interpolace)
+                interpolated_price_per_mm = calculate_interpolated_extension_price(model, sirka, moduly)
                 
-                # 1. KONSTRUKCE (LINIE)
-                cost_structure = (diff_len / 1000.0) * price_profiles_linear
+                # Pokud by selhalo (např. jsme na konci ceníku), použijeme fallback
+                if interpolated_price_per_mm <= 0:
+                    interpolated_price_per_mm = 10 # Fallback (cca 10k/metr)
                 
-                # 2. POLYKARBONÁT (PLOCHA)
-                # Korekce pro hranaté modely (Angular)
-                geo_factor = 0.80 if model.upper() in ANGULAR_MODELS or is_rock else 1.0
+                # Získáme cenu za prodloužení (materiál)
+                material_cost = diff_len * interpolated_price_per_mm
                 
-                # Zjištění ceny polykarbonátu (cca 1000 Kč/m2, ale může být i jinak v DB)
-                p_poly_price = get_surcharge_db("Plný polykarbonát", is_rock)
-                price_poly_m2 = 1000 # Výchozí hodnota
-                if p_poly_price['fix'] > 10: price_poly_m2 = p_poly_price['fix']
+                # Přičteme fixní poplatek za ATYP (práce/řezání) - default 3000
+                p_atyp_fix = get_surcharge_db("Prodloužení modulu", is_rock)
+                atyp_fee = p_atyp_fix['fix'] if p_atyp_fix['fix'] > 0 else 3000
+                total_fix_fee = pocet_prod_modulu * atyp_fee
                 
-                # Plocha navíc (běžný metr oblouku * délka navíc * factor)
-                added_area = (total_arc_len_mm / 1000.0 / moduly) * (diff_len / 1000.0) * geo_factor
-                cost_poly = added_area * price_poly_m2
+                total_extension_cost = material_cost + total_fix_fee
                 
-                # 3. KOLEJE (LINIE)
-                p_rail_unit = get_surcharge_db("Jeden metr koleje", is_rock)
-                price_rail_m = p_rail_unit['fix'] if p_rail_unit['fix'] > 0 else 220
-                if pochozi_koleje or obousmerne_koleje:
-                     p_rail_walk = get_surcharge_db("Pochozí kolejnice", is_rock)
-                     if p_rail_walk['fix'] > 0: price_rail_m = p_rail_walk['fix']
-                
-                cost_rails = (diff_len / 1000.0) * 2 * price_rail_m
-                
-                total_ext_cost = cost_structure + cost_poly + cost_rails
-                
-                items.append({"pol": f"Prodloužení {pocet_prod_modulu} mod.", 
-                              "det": f"+{diff_len} mm (Konstr: {cost_structure:.0f}, Poly: {cost_poly:.0f}, Koleje: {cost_rails:.0f})", 
-                              "cen": total_ext_cost})
+                items.append({"pol": f"Prodloužení {pocet_prod_modulu} mod. (ATYP)", 
+                              "det": f"+{diff_len} mm (Mat: {material_cost:,.0f} + Práce: {total_fix_fee:,.0f})", 
+                              "cen": total_extension_cost})
 
             elif diff_len < -10:
                  p_zkrac = get_surcharge_db("Zkrácení modulu", is_rock)
