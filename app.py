@@ -14,7 +14,7 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy import func
 
 # --- VERZE APLIKACE ---
-APP_VERSION = "63.0 (Dynamic Price Interpolation)"
+APP_VERSION = "64.0 (User Formula Fix)"
 
 # --- HESLO ADMINA ---
 ADMIN_PASSWORD = "admin123"
@@ -23,10 +23,9 @@ ADMIN_PASSWORD = "admin123"
 ROOF_OVERLAP_MM = 100 
 FACE_WASTE_COEF = 0.85 
 MIN_MODULE_LEN_MM = 1800 
-STANDARD_MODULE_LEN_MM = 2190 # Průměrná délka modulu pro výpočet ceny
 
-# --- ZÁLOŽNÍ HODNOTY ---
-DEFAULT_RAIL_PRICES = {2: 910, 3: 2730, 4: 5460, 5: 9100, 6: 13650, 7: 19106}
+# --- KATEGORIE MODELŮ (GEOMETRIE) ---
+ANGULAR_MODELS = ["FLASH", "WING", "DREAM", "AZURE", "TERRACE"]
 
 # --- DEFINICE MODELŮ ---
 MODEL_PARAMS = {
@@ -120,8 +119,9 @@ def parse_value_clean(val):
     try: return float(s.replace(',', '.'))
     except: return 0
 
-def geometry_segment_area(width_mm, height_mm):
-    if width_mm <= 0: return 0, 0
+def geometry_segment_values(width_mm, height_mm):
+    """Vrací (Plocha_pro_výrobu, Délka_oblouku_mm, Čistá_geometrická_plocha)"""
+    if width_mm <= 0: return 0, 0, 0
     if height_mm <= 0: height_mm = 1
     s = width_mm
     v = height_mm
@@ -135,31 +135,42 @@ def geometry_segment_area(width_mm, height_mm):
             alpha_rad = 2 * math.asin(ratio)
             arc_len = alpha_rad * R
     except: arc_len = s
-    raw_rect_area = (s * v) / 1_000_000 
-    production_area = raw_rect_area * FACE_WASTE_COEF
-    return production_area, arc_len / 1000
 
-def calculate_complex_geometry(model_name, width_input_mm, height_input_mm, modules, total_length_mm):
+    raw_rect_area = (s * v) / 1_000_000 
+    production_area = raw_rect_area * FACE_WASTE_COEF # Pouze pro čela
+    return production_area, arc_len, raw_rect_area
+
+def calculate_complex_geometry_v2(model_name, width_input_mm, height_input_mm, modules, total_length_mm):
     params = MODEL_PARAMS.get(model_name.upper(), MODEL_PARAMS["DEFAULT"])
     step_w = params["step_w"]
     step_h = params["step_h"]
+
+    # Čela (s odpadem)
     w_small = width_input_mm
     h_small = height_input_mm
-    area_face_small, arc_small = geometry_segment_area(w_small, h_small)
+    area_face_small, _, _ = geometry_segment_values(w_small, h_small)
+    
     w_large = width_input_mm + ((modules - 1) * step_w)
     h_large = height_input_mm + ((modules - 1) * step_h)
-    area_face_large, arc_large = geometry_segment_area(w_large, h_large)
+    area_face_large, _, _ = geometry_segment_values(w_large, h_large)
+    
+    # Střecha (bez odpadu, čistá geometrie)
     mod_len_mm = total_length_mm / modules
     sheet_len_m = (mod_len_mm + ROOF_OVERLAP_MM) / 1000.0
-    total_roof_area = 0
+    
+    total_roof_area_geometric = 0
     total_arc_len_mm = 0 
+    
     for i in range(modules):
         w_i = width_input_mm + (i * step_w)
         h_i = height_input_mm + (i * step_h)
-        _, arc_len_i_m = geometry_segment_area(w_i, h_i)
-        total_roof_area += (arc_len_i_m * sheet_len_m)
-        total_arc_len_mm += (arc_len_i_m * 1000)
-    return total_roof_area, area_face_large, area_face_small, total_arc_len_mm
+        _, arc_len_i_mm, _ = geometry_segment_values(w_i, h_i)
+        
+        # Geometrická plocha = délka oblouku * délka modulu (vč. překryvu)
+        total_roof_area_geometric += (arc_len_i_mm / 1000.0) * sheet_len_m
+        total_arc_len_mm += arc_len_i_mm
+        
+    return total_roof_area_geometric, area_face_large, area_face_small, total_arc_len_mm
 
 def get_surcharge_db(search_term, is_rock=False):
     if not SessionLocal: return {"fix": 0, "pct": 0}
@@ -203,47 +214,12 @@ def calculate_base_price_db(model, width_mm, modules):
     except Exception as e: return 0,0, str(e)
     finally: session.close()
 
-# NOVÁ KLÍČOVÁ FUNKCE: Vypočítá cenu za metr prodloužení přímo z ceníku
-def calculate_interpolated_extension_price(model, width_mm, modules):
-    if not SessionLocal: return 0
-    session = SessionLocal()
-    try:
-        # 1. Najdi cenu pro aktuální počet modulů (např. 3)
-        row_curr = session.query(Cenik).filter(Cenik.model == model, Cenik.moduly == modules, Cenik.sirka_mm >= width_mm).order_by(Cenik.sirka_mm.asc()).first()
-        
-        # 2. Najdi cenu pro vyšší počet modulů (např. 4)
-        row_next = session.query(Cenik).filter(Cenik.model == model, Cenik.moduly == modules + 1, Cenik.sirka_mm >= width_mm).order_by(Cenik.sirka_mm.asc()).first()
-        
-        # Pokud neexistuje vyšší (jsme na 7 modulech), zkusíme nižší
-        if not row_next:
-             row_prev = session.query(Cenik).filter(Cenik.model == model, Cenik.moduly == modules - 1, Cenik.sirka_mm >= width_mm).order_by(Cenik.sirka_mm.asc()).first()
-             if row_curr and row_prev:
-                 delta_price = row_curr.cena - row_prev.cena
-             else:
-                 return 0 # Nelze spočítat
-        else:
-             delta_price = row_next.cena - row_curr.cena
-        
-        # Cena za 1 mm délky zastřešení (konstrukce + poly + koleje ve standardu)
-        price_per_mm = delta_price / STANDARD_MODULE_LEN_MM
-        return price_per_mm
-        
-    finally:
-        session.close()
-
 def save_offer_to_db(data_dict, total_price):
     if not SessionLocal: return False, "DB Error"
     session = SessionLocal()
     try:
         json_str = json.dumps(data_dict, default=str)
-        obchodnik = data_dict.get('vypracoval', 'Neznámý')
-        nova_nabidka = Nabidka(
-            zakaznik=data_dict.get('zak_jmeno', 'Neznámý'), 
-            model=data_dict.get('model', '-'), 
-            cena_celkem=total_price, 
-            data_json=json_str, 
-            datum_vytvoreni=datetime.now()
-        )
+        nova_nabidka = Nabidka(zakaznik=data_dict.get('zak_jmeno', 'Neznámý'), model=data_dict.get('model', '-'), cena_celkem=total_price, data_json=json_str, datum_vytvoreni=datetime.now())
         session.add(nova_nabidka)
         session.commit()
         return True, "Uloženo."
@@ -582,29 +558,30 @@ if app_mode == "Kalkulátor":
                 steps = zvyseni_cm / 10
                 items.append({"pol": f"Zvýšení o {zvyseni_cm} cm", "det": f"+{pct_per_10cm * steps * 100:.0f}%", "cen": base_price * pct_per_10cm * steps})
 
-            roof_a, face_a_large, face_a_small, total_arc_len_mm = calculate_complex_geometry(model, sirka, height, moduly, celkova_delka)
+            roof_a_geo, face_a_large, face_a_small, total_arc_len_mm = calculate_complex_geometry_v2(model, sirka, height, moduly, celkova_delka)
             
             if diff_len > 10:
-                # DYNAMICKÁ CENA (Interpolace)
-                interpolated_price_per_mm = calculate_interpolated_extension_price(model, sirka, moduly)
-                
-                # Pokud by selhalo (např. jsme na konci ceníku), použijeme fallback
-                if interpolated_price_per_mm <= 0:
-                    interpolated_price_per_mm = 10 # Fallback (cca 10k/metr)
-                
-                # Získáme cenu za prodloužení (materiál)
-                material_cost = diff_len * interpolated_price_per_mm
-                
-                # Přičteme fixní poplatek za ATYP (práce/řezání) - default 3000
                 p_atyp_fix = get_surcharge_db("Prodloužení modulu", is_rock)
                 atyp_fee = p_atyp_fix['fix'] if p_atyp_fix['fix'] > 0 else 3000
-                total_fix_fee = pocet_prod_modulu * atyp_fee
                 
-                total_extension_cost = material_cost + total_fix_fee
+                p_var_mat = get_surcharge_db("Prodloužení modulu za metr", is_rock)
+                price_per_m2 = p_var_mat['fix'] if p_var_mat['fix'] > 0 else 2000
+                
+                # Výpočet přesné plochy prodloužení: 
+                # (Průměrná délka oblouku segmentu) * (Celkové prodloužení délky)
+                avg_arc_len_m = (total_arc_len_mm / moduly) / 1000.0
+                extension_area_m2 = avg_arc_len_m * (diff_len / 1000.0)
+                
+                # Pokud je model hranatý (ANGULAR), aplikujeme korekci, protože reálná plocha je menší než oblouk
+                geo_correction = 0.80 if model.upper() in ANGULAR_MODELS else 1.0
+                extension_area_m2 *= geo_correction
+                
+                material_cost = extension_area_m2 * price_per_m2
+                fix_cost = pocet_prod_modulu * atyp_fee
                 
                 items.append({"pol": f"Prodloužení {pocet_prod_modulu} mod. (ATYP)", 
-                              "det": f"+{diff_len} mm (Mat: {material_cost:,.0f} + Práce: {total_fix_fee:,.0f})", 
-                              "cen": total_extension_cost})
+                              "det": f"+{diff_len} mm (Mat: {material_cost:.0f}, Fix: {fix_cost:.0f})", 
+                              "cen": fix_cost + material_cost})
 
             elif diff_len < -10:
                  p_zkrac = get_surcharge_db("Zkrácení modulu", is_rock)
@@ -622,11 +599,18 @@ if app_mode == "Kalkulátor":
                 p = get_surcharge_db("antracit elox", is_rock)
                 items.append({"pol": "Antracit Elox", "det": "", "cen": base_price * (p['pct'] or 0.05)})
 
-            p_poly = get_surcharge_db("Plný polykarbonát", is_rock)
-            poly_val = p_poly['fix'] if p_poly['fix'] > 10 else 2000
-            if poly_strecha: items.append({"pol": "Plný poly (Střecha)", "det": f"{roof_a:.1f} m²", "cen": roof_a * poly_val})
-            if poly_celo_male and not bez_maleho_cela: items.append({"pol": "Plný poly (M. čelo)", "det": f"{face_a_small:.1f} m²", "cen": face_a_small * poly_val})
-            if poly_celo_velke and not bez_velkeho_cela: items.append({"pol": "Plný poly (V. čelo)", "det": f"{face_a_large:.1f} m²", "cen": face_a_large * poly_val})
+            p_poly_price = get_surcharge_db("Plný polykarbonát", is_rock)
+            poly_base_price = p_poly_price['fix'] if p_poly_price['fix'] > 10 else 1000
+            
+            # NOVÝ VÝPOČET POLY (BEZ ODPADU, KOEF 1.1)
+            if poly_strecha: 
+                cost_poly_roof = roof_a_geo * poly_base_price * 1.1
+                items.append({"pol": "Plný poly (Střecha)", "det": f"{roof_a_geo:.1f} m² (Geo)", "cen": cost_poly_roof})
+            
+            # Čela počítáme stále s odpadem (protože se vyřezávají z desek)
+            if poly_celo_male and not bez_maleho_cela: items.append({"pol": "Plný poly (M. čelo)", "det": f"{face_a_small:.1f} m²", "cen": face_a_small * poly_base_price})
+            if poly_celo_velke and not bez_velkeho_cela: items.append({"pol": "Plný poly (V. čelo)", "det": f"{face_a_large:.1f} m²", "cen": face_a_large * poly_base_price})
+            
             if change_color_poly:
                  p = get_surcharge_db("barvy poly", is_rock)
                  items.append({"pol": "Změna barvy poly", "det": "", "cen": base_price * (p['pct'] or 0.07)})
