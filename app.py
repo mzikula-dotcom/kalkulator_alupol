@@ -14,7 +14,7 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy import func
 
 # --- VERZE APLIKACE ---
-APP_VERSION = "60.0 (Height Increase + Rock Fix)"
+APP_VERSION = "59.0 (Fixed Shortening)"
 
 # --- HESLO ADMINA ---
 ADMIN_PASSWORD = "admin123"
@@ -210,6 +210,23 @@ def calculate_base_price_db(model, width_mm, modules):
             if max_row: return 0, 0, f"Mimo rozsah (Max pro {model} je {max_row.sirka_mm} mm)"
             return 0, 0, "Rozměr nebo počet modulů nenalezen"
     except Exception as e: return 0,0, str(e)
+    finally: session.close()
+
+def calculate_extension_price_final(model, width_mm, modules):
+    if not SessionLocal: return 0
+    session = SessionLocal()
+    try:
+        row_curr = session.query(Cenik).filter(Cenik.model == model, Cenik.moduly == modules, Cenik.sirka_mm >= width_mm).order_by(Cenik.sirka_mm.asc()).first()
+        row_next = session.query(Cenik).filter(Cenik.model == model, Cenik.moduly == modules + 1, Cenik.sirka_mm >= width_mm).order_by(Cenik.sirka_mm.asc()).first()
+        mod_len = 2110.0
+        structure_part = 0
+        if row_curr and row_next: structure_part = row_next.cena - row_curr.cena
+        else:
+            row_prev = session.query(Cenik).filter(Cenik.model == model, Cenik.moduly == modules - 1, Cenik.sirka_mm >= width_mm).order_by(Cenik.sirka_mm.asc()).first()
+            if row_curr and row_prev: structure_part = row_curr.cena - row_prev.cena
+        rail_part = get_rail_price_from_db(modules)
+        price_per_meter = (structure_part + rail_part) / (mod_len / 1000.0)
+        return price_per_meter
     finally: session.close()
 
 def save_offer_to_db(data_dict, total_price):
@@ -504,9 +521,6 @@ if app_mode == "Kalkulátor":
         else: 
             pocet_prod_modulu = 1
             
-        # ZVÝŠENÍ
-        zvyseni_cm = st.number_input("Zvýšení zastřešení (po 10 cm)", 0, 50, get_val('zvyseni_cm', 0), step=10)
-            
         # CHECKER: MINIMÁLNÍ DÉLKA MODULU
         avg_mod_len = celkova_delka / moduly
         if avg_mod_len < MIN_MODULE_LEN_MM:
@@ -582,18 +596,6 @@ if app_mode == "Kalkulátor":
             items = []
             items.append({"pol": f"Zastřešení {model}", "det": f"{moduly} seg., Š:{sirka}mm", "cen": base_price})
             
-            # --- ZVÝŠENÍ (NOVÁ FUNKCE) ---
-            if zvyseni_cm > 0:
-                p_zvyseni = get_surcharge_db("Zvýšení zastřešení", is_rock)
-                # Pokud DB vrátí 0 (nenalezeno), fallback na 0.03 (3%) nebo 0.02 (2% Rock)
-                def_pct = 0.02 if is_rock else 0.03
-                pct_per_10cm = p_zvyseni['pct'] if p_zvyseni['pct'] > 0 else def_pct
-                
-                steps = zvyseni_cm / 10
-                total_zvyseni_pct = pct_per_10cm * steps
-                cost_zvyseni = base_price * total_zvyseni_pct
-                items.append({"pol": f"Zvýšení o {zvyseni_cm} cm", "det": f"+{total_zvyseni_pct*100:.0f}%", "cen": cost_zvyseni})
-
             roof_a, face_a_large, face_a_small, total_arc_len_mm = calculate_complex_geometry(model, sirka, height, moduly, celkova_delka)
             if diff_len > 10:
                 p_fix_mod = get_surcharge_db("Prodloužení modulu", is_rock)
@@ -602,16 +604,11 @@ if app_mode == "Kalkulátor":
                 val_fix2 = p_var_mat['fix'] if p_var_mat['fix'] > 0 else 2000
                 
                 fix_cost = (pocet_prod_modulu * val_fix1)
-                
-                # KOREKCE PRO VYSOKÉ MODELY (ROCK)
-                # Pokud je model ROCK, snížíme započítatelnou plochu pro příplatek, 
-                # aby cena odpovídala realitě (cca 15k vs 19k). Faktor 0.75 srazí cenu dolů.
-                geometry_pricing_factor = 0.75 if is_rock else 1.0
-                
                 factor_val = get_poly_factor_from_db()
-                var_cost = (total_arc_len_mm * factor_val * geometry_pricing_factor) * (diff_len / 1000000.0) * val_fix2
+                var_cost = (total_arc_len_mm * factor_val) * (diff_len / 1000000.0) * val_fix2
                 items.append({"pol": f"Prodloužení {pocet_prod_modulu} mod.", "det": f"+{diff_len} mm", "cen": fix_cost + var_cost})
             
+            # --- ZKRÁCENÍ (NOVÁ LOGIKA) ---
             elif diff_len < -10:
                  p_zkrac = get_surcharge_db("Zkrácení modulu", is_rock)
                  price_per_mod = p_zkrac['fix'] if p_zkrac['fix'] > 0 else 2000
@@ -702,7 +699,7 @@ if app_mode == "Kalkulátor":
             c_btn1, c_btn2 = st.columns(2)
             with c_btn1:
                 if zak_jmeno:
-                    zak_udaje = {'jmeno': zak_jmeno, 'adresa': zak_adresa, 'tel': zak_tel, 'email': zak_email, 'vypracoval': vypracoval, 'datum': datum_vystaveni.strftime("%d.%m.%Y"), 'platnost': platnost_do.strftime("%d.%m.%Y"), 'termin': termin_dodani, 'zvyseni_cm': zvyseni_cm}
+                    zak_udaje = {'jmeno': zak_jmeno, 'adresa': zak_adresa, 'tel': zak_tel, 'email': zak_email, 'vypracoval': vypracoval, 'datum': datum_vystaveni.strftime("%d.%m.%Y"), 'platnost': platnost_do.strftime("%d.%m.%Y"), 'termin': termin_dodani}
                     totals = {'bez_dph': total_no_vat, 'dph': total_vat-total_no_vat, 's_dph': total_vat, 'sazba_dph': dph_sazba}
                     pdf_data = generate_pdf_html(zak_udaje, items, totals, model)
                     st.download_button("📄 PDF", data=pdf_data, file_name=f"Nabidka_{zak_jmeno}.pdf", mime="application/pdf", type="primary", use_container_width=True)
@@ -710,7 +707,7 @@ if app_mode == "Kalkulátor":
                 if zak_jmeno:
                     if st.button("💾 Uložit", use_container_width=True):
                         save_data = st.session_state.get('form_data', {}).copy()
-                        save_data.update({'zak_jmeno': zak_jmeno, 'model': model, 'vypracoval': vypracoval, 'zvyseni_cm': zvyseni_cm})
+                        save_data.update({'zak_jmeno': zak_jmeno, 'model': model, 'vypracoval': vypracoval})
                         success, msg = save_offer_to_db(save_data, total_vat)
                         if success: st.success("OK")
                         else: st.error(msg)
