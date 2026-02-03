@@ -14,7 +14,7 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy import func
 
 # --- VERZE APLIKACE ---
-APP_VERSION = "66.2 (Remove Azure + Hotfix)"
+APP_VERSION = "67.0 (Correct Extension Formula)"
 
 # --- HESLO ADMINA ---
 ADMIN_PASSWORD = "admin123"
@@ -26,8 +26,8 @@ MIN_MODULE_LEN_MM = 1800
 STANDARD_MODULE_LEN_MM = 2190
 
 # --- KATEGORIE MODELŮ (GEOMETRIE) ---
-# Seznam modelů, které mají hranatý/lomený tvar (ne oblouk)
-# Azure odstraněno - jiný výrobce
+# Tyto modely mají hranatý tvar, takže jejich plocha oblouku je menší než u kruhu
+# Korekce se použije pro výpočet plochy polykarbonátu
 ANGULAR_MODELS = ["FLASH", "WING", "DREAM", "TERRACE"]
 
 # --- DEFINICE MODELŮ ---
@@ -157,12 +157,12 @@ def calculate_complex_geometry_v2(model_name, width_input_mm, height_input_mm, m
     h_large = height_input_mm + ((modules - 1) * step_h)
     area_face_large, _, _ = geometry_segment_values(w_large, h_large)
     
-    # Střecha (bez odpadu, čistá geometrie)
+    # Střecha (geometrie)
     mod_len_mm = total_length_mm / modules
     sheet_len_m = (mod_len_mm + ROOF_OVERLAP_MM) / 1000.0
     
     total_roof_area_geometric = 0
-    total_arc_len_mm = 0 
+    total_arc_len_mm = 0
     
     for i in range(modules):
         w_i = width_input_mm + (i * step_w)
@@ -198,6 +198,15 @@ def get_rail_price_from_db(modules):
         else: return DEFAULT_RAIL_PRICES.get(modules, 0)
     finally: session.close()
 
+def get_poly_factor_from_db():
+    if not SessionLocal: return DEFAULT_POLY_FACTOR
+    session = SessionLocal()
+    try:
+        item = session.query(Priplatek).filter(Priplatek.nazev.ilike("Koeficient plochy")).first()
+        if item and item.cena_fix > 0: return item.cena_fix
+        else: return DEFAULT_POLY_FACTOR
+    finally: session.close()
+
 def calculate_base_price_db(model, width_mm, modules):
     if not SessionLocal: return 0,0, "DB Error"
     session = SessionLocal()
@@ -216,28 +225,6 @@ def calculate_base_price_db(model, width_mm, modules):
             return 0, 0, "Rozměr nebo počet modulů nenalezen"
     except Exception as e: return 0,0, str(e)
     finally: session.close()
-
-# VÝPOČET JEDNOTKOVÉ CENY Z CENÍKU (INTERPOLACE)
-def get_price_per_mm_from_db(model, width_mm, modules):
-    if not SessionLocal: return 0
-    session = SessionLocal()
-    try:
-        row_curr = session.query(Cenik).filter(Cenik.model == model, Cenik.moduly == modules, Cenik.sirka_mm >= width_mm).order_by(Cenik.sirka_mm.asc()).first()
-        row_next = session.query(Cenik).filter(Cenik.model == model, Cenik.moduly == modules + 1, Cenik.sirka_mm >= width_mm).order_by(Cenik.sirka_mm.asc()).first()
-        
-        if row_curr and row_next:
-            diff = row_next.cena - row_curr.cena
-            return diff / STANDARD_MODULE_LEN_MM
-        
-        # Fallback
-        row_prev = session.query(Cenik).filter(Cenik.model == model, Cenik.moduly == modules - 1, Cenik.sirka_mm >= width_mm).order_by(Cenik.sirka_mm.asc()).first()
-        if row_curr and row_prev:
-            diff = row_curr.cena - row_prev.cena
-            return diff / STANDARD_MODULE_LEN_MM
-            
-        return 0 
-    finally:
-        session.close()
 
 def save_offer_to_db(data_dict, total_price):
     if not SessionLocal: return False, "DB Error"
@@ -590,36 +577,48 @@ if app_mode == "Kalkulátor":
                 steps = zvyseni_cm / 10
                 items.append({"pol": f"Zvýšení o {zvyseni_cm} cm", "det": f"+{pct_per_10cm * steps * 100:.0f}%", "cen": base_price * pct_per_10cm * steps})
 
-            # VOLÁNÍ FUNKCE, KTERÁ BYLA OPRAVENA:
-            roof_a_geo, face_a_large, face_a_small, _ = calculate_complex_geometry_v2(model, sirka, height, moduly, celkova_delka)
+            roof_a_geo, face_a_large, face_a_small, total_arc_len_mm = calculate_complex_geometry_v2(model, sirka, height, moduly, celkova_delka)
             
             if diff_len > 10:
-                interpolated_price_per_mm = get_price_per_mm_from_db(model, sirka, moduly)
-                if interpolated_price_per_mm <= 0: interpolated_price_per_mm = 10 
-                
-                material_cost = diff_len * interpolated_price_per_mm
-                
+                # 1. ATYP PŘÍPLATEK (PRÁCE)
                 p_atyp_fix = get_surcharge_db("Prodloužení modulu", is_rock)
                 atyp_fee = p_atyp_fix['fix'] if p_atyp_fix['fix'] > 0 else 3000
                 total_fix_fee = pocet_prod_modulu * atyp_fee
                 
-                rail_surcharge = 0
-                if (pochozi_koleje or obousmerne_koleje) and not pochozi_koleje_zdarma:
-                    p_std = get_surcharge_db("Jeden metr koleje", is_rock)
-                    p_premium = get_surcharge_db("Pochozí kolejnice", is_rock)
-                    
-                    std_price = p_std['fix'] if p_std['fix'] > 0 else 220
-                    prem_price = p_premium['fix'] if p_premium['fix'] > 0 else 330
-                    
-                    diff_per_m = max(0, prem_price - std_price)
-                    rail_surcharge = (diff_len / 1000.0) * 2 * diff_per_m
-
-                total_extension_cost = material_cost + total_fix_fee + rail_surcharge
+                # 2. VARIABILNÍ CENA ZA MATERIÁL (DÉLKA OBLOUKU * PRODLOUŽENÍ * CENA/M2)
+                p_var_mat = get_surcharge_db("Prodloužení modulu za metr", is_rock)
+                price_per_m2_material = p_var_mat['fix'] if p_var_mat['fix'] > 0 else 2000
                 
-                det_text = f"+{diff_len} mm"
-                if rail_surcharge > 0: det_text += f" (vč. doplatku kolejí {rail_surcharge:,.0f})"
+                # Průměrná délka oblouku (v metrech)
+                avg_arc_len_m = (total_arc_len_mm / moduly) / 1000.0
                 
-                items.append({"pol": f"Prodloužení {pocet_prod_modulu} mod. (ATYP)", "det": det_text, "cen": total_extension_cost})
+                # Pokud je model hranatý, korekce plochy (aby to sedělo na ceník)
+                geo_correction = 0.80 if model.upper() in ANGULAR_MODELS else 1.0
+                
+                extension_area = avg_arc_len_m * (diff_len / 1000.0) * geo_correction
+                material_cost = extension_area * price_per_m2_material
+                
+                # 3. PŘÍPLATEK ZA KOLEJE
+                rail_cost = 0
+                p_rail_unit = get_surcharge_db("Jeden metr koleje", is_rock)
+                price_rail_std = p_rail_unit['fix'] if p_rail_unit['fix'] > 0 else 220
+                
+                # Pokud klient chce pochozí a nejsou zdarma -> doplatíme rozdíl nebo plnou cenu?
+                # V logice "stavíme z nuly" musíme zaplatit i základní koleje.
+                rail_price_used = price_rail_std
+                if pochozi_koleje or obousmerne_koleje:
+                     p_rail_prem = get_surcharge_db("Pochozí kolejnice", is_rock)
+                     price_rail_prem = p_rail_prem['fix'] if p_rail_prem['fix'] > 0 else 330
+                     
+                     if pochozi_koleje_zdarma: rail_price_used = 0 # Akce = 0
+                     else: rail_price_used = price_rail_prem
+                
+                rail_cost = (diff_len / 1000.0) * 2 * rail_price_used
+                
+                total_ext_cost = total_fix_fee + material_cost + rail_cost
+                
+                det_txt = f"+{diff_len} mm (Fix: {total_fix_fee:.0f}, Mat: {material_cost:.0f}, Rail: {rail_cost:.0f})"
+                items.append({"pol": f"Prodloužení {pocet_prod_modulu} mod. (ATYP)", "det": det_txt, "cen": total_ext_cost})
 
             elif diff_len < -10:
                  p_zkrac = get_surcharge_db("Zkrácení modulu", is_rock)
