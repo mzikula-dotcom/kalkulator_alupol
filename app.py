@@ -14,7 +14,7 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy import func
 
 # --- VERZE APLIKACE ---
-APP_VERSION = "70.0 (Removal of Extension Fixed Fee)"
+APP_VERSION = "71.0 (Single Flat Fee for Extension)"
 
 # --- HESLO ADMINA ---
 ADMIN_PASSWORD = "admin123"
@@ -26,7 +26,6 @@ MIN_MODULE_LEN_MM = 1800
 STANDARD_MODULE_LEN_MM = 2190
 
 # --- KATEGORIE MODELŮ (GEOMETRIE) ---
-# Modely s hranatým tvarem nebo svislými stěnami (korekce plochy)
 ANGULAR_MODELS = ["FLASH", "WING", "DREAM", "TERRACE", "ROCK", "HARMONY"]
 
 # --- DEFINICE MODELŮ ---
@@ -123,7 +122,6 @@ def parse_value_clean(val):
     except: return 0
 
 def geometry_segment_values(width_mm, height_mm):
-    """Vrací (Plocha_pro_výrobu, Délka_oblouku_mm, Čistá_geometrická_plocha)"""
     if width_mm <= 0: return 0, 0, 0
     if height_mm <= 0: height_mm = 1
     s = width_mm
@@ -140,7 +138,7 @@ def geometry_segment_values(width_mm, height_mm):
     except: arc_len = s
 
     raw_rect_area = (s * v) / 1_000_000 
-    production_area = raw_rect_area * FACE_WASTE_COEF # Pouze pro čela
+    production_area = raw_rect_area * FACE_WASTE_COEF 
     return production_area, arc_len, raw_rect_area
 
 def calculate_complex_geometry_v2(model_name, width_input_mm, height_input_mm, modules, total_length_mm):
@@ -148,7 +146,6 @@ def calculate_complex_geometry_v2(model_name, width_input_mm, height_input_mm, m
     step_w = params["step_w"]
     step_h = params["step_h"]
 
-    # Čela (s odpadem)
     w_small = width_input_mm
     h_small = height_input_mm
     area_face_small, _, _ = geometry_segment_values(w_small, h_small)
@@ -157,10 +154,8 @@ def calculate_complex_geometry_v2(model_name, width_input_mm, height_input_mm, m
     h_large = height_input_mm + ((modules - 1) * step_h)
     area_face_large, _, _ = geometry_segment_values(w_large, h_large)
     
-    # Střecha (geometrie)
     mod_len_mm = total_length_mm / modules
     sheet_len_m = (mod_len_mm + ROOF_OVERLAP_MM) / 1000.0
-    
     total_roof_area_geometric = 0
     total_arc_len_mm = 0
     
@@ -168,8 +163,6 @@ def calculate_complex_geometry_v2(model_name, width_input_mm, height_input_mm, m
         w_i = width_input_mm + (i * step_w)
         h_i = height_input_mm + (i * step_h)
         _, arc_len_i_mm, _ = geometry_segment_values(w_i, h_i)
-        
-        # Geometrická plocha = délka oblouku * délka modulu (vč. překryvu)
         total_roof_area_geometric += (arc_len_i_mm / 1000.0) * sheet_len_m
         total_arc_len_mm += arc_len_i_mm
         
@@ -601,16 +594,17 @@ if app_mode == "Kalkulátor":
 
             roof_a_geo, face_a_large, face_a_small, total_arc_len_mm = calculate_complex_geometry_v2(model, sirka, height, moduly, celkova_delka)
             
-            # --- DEBUG VARIABLES START ---
+            # --- DEBUG VARIABLES ---
             debug_ext_fix = 0
             debug_ext_mat = 0
             debug_ext_rail = 0
             debug_ext_total = 0
-            # --- DEBUG VARIABLES END ---
 
             if diff_len > 10:
-                # ZMĚNA: PRODLOUŽENÍ NEMÁ FIXNÍ POPLATEK (JEN MATERIÁL)
-                total_fix_fee = 0 # Vyřazeno, protože prodloužení je standardní výroba bez extra řezání
+                # ZMĚNA: Pouze jeden paušální poplatek za celé prodloužení (bez ohledu na počet modulů)
+                p_atyp_fix = get_surcharge_db("Prodloužení modulu", is_rock)
+                atyp_fee = p_atyp_fix['fix'] if p_atyp_fix['fix'] > 0 else 3000
+                total_fix_fee = atyp_fee # Jen jednou!
                 debug_ext_fix = total_fix_fee
                 
                 p_var_mat = get_surcharge_db("Prodloužení modulu za metr", is_rock)
@@ -642,10 +636,9 @@ if app_mode == "Kalkulátor":
                 debug_ext_total = total_ext_cost
                 
                 det_txt = f"+{diff_len} mm"
-                items.append({"pol": f"Prodloužení {pocet_prod_modulu} mod.", "det": det_txt, "cen": total_ext_cost})
+                items.append({"pol": f"Prodloužení {pocet_prod_modulu} mod. (ATYP)", "det": det_txt, "cen": total_ext_cost})
 
             elif diff_len < -10:
-                 # ZKRÁCENÍ MÁ FIXNÍ POPLATEK (PRÁCE NAVÍC)
                  p_zkrac = get_surcharge_db("Zkrácení modulu", is_rock)
                  price_per_mod = p_zkrac['fix'] if p_zkrac['fix'] > 0 else 2000
                  items.append({"pol": f"Zkrácení zastřešení (Atyp)", "det": f"{moduly} ks x {price_per_mod:,.0f} Kč", "cen": moduly * price_per_mod})
@@ -727,7 +720,7 @@ if app_mode == "Kalkulátor":
                 st.markdown(f"""
                 <div class='debug-box'>
                 <strong>Prodloužení ({diff_len:.0f} mm):</strong><br>
-                1. Fixní poplatek (Práce): <b>0 Kč</b> (zrušeno)<br>
+                1. Paušální poplatek (Práce): 1 x 3000 = <b>{debug_ext_fix:,.0f} Kč</b><br>
                 2. Materiál (Plocha): {debug_ext_mat:,.0f} Kč<br>
                 3. Koleje: {debug_ext_rail:,.0f} Kč<br>
                 ---------------------------------------<br>
