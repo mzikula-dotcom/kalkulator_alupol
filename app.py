@@ -14,7 +14,7 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy import func
 
 # --- VERZE APLIKACE ---
-APP_VERSION = "72.0 (User Formula: 3k/pcs + Standard Material)"
+APP_VERSION = "73.0 (Final Extension Logic)"
 
 # --- HESLO ADMINA ---
 ADMIN_PASSWORD = "admin123"
@@ -26,7 +26,7 @@ MIN_MODULE_LEN_MM = 1800
 STANDARD_MODULE_LEN_MM = 2190
 
 # --- KATEGORIE MODELŮ (GEOMETRIE) ---
-# Modely, které potřebují korekci plochy (nejsou to čisté oblouky)
+# Modely, které mají hranatý tvar
 ANGULAR_MODELS = ["FLASH", "WING", "DREAM", "TERRACE", "ROCK", "HARMONY"]
 
 # --- DEFINICE MODELŮ ---
@@ -493,7 +493,7 @@ if app_mode == "Kalkulátor":
         
         diff_len = celkova_delka - std_len
         if diff_len > 10:
-            pocet_prod_modulu = st.number_input("Počet prodloužených modulů", 1, moduly, get_val('pocet_prod_modulu', 1))
+            pocet_prod_modulu = st.number_input("Počet prodloužených modulů", 1, moduly, get_val('pocet_prod_modulu', moduly))
         else: pocet_prod_modulu = 1
         zvyseni_cm = st.number_input("Zvýšení zastřešení (po 10 cm)", 0, 50, get_val('zvyseni_cm', 0), step=10)
         avg_mod_len = celkova_delka / moduly
@@ -581,23 +581,21 @@ if app_mode == "Kalkulátor":
             # --- DEBUG VARIABLES END ---
 
             if diff_len > 10:
-                # 1. FIXNÍ POPLATEK ZA KUS (dle zadání uživatele)
+                # 1. FIXNÍ POPLATEK ZA KUS (3000 Kč * počet)
                 p_atyp_fix = get_surcharge_db("Prodloužení modulu", is_rock)
                 atyp_fee = p_atyp_fix['fix'] if p_atyp_fix['fix'] > 0 else 3000
                 total_fix_fee = pocet_prod_modulu * atyp_fee
                 debug_ext_fix = total_fix_fee
                 
-                # 2. MATERIÁL (STANDARDNÍ CENA ZA METR Z TABULKY PŘÍPLATKŮ, BEZ INTERPOLACE)
+                # 2. MATERIÁL (STANDARDNÍ CENA ZA METR Z TABULKY PŘÍPLATKŮ, BEZ KOREKCÍ)
+                # Cena 2000 Kč/m2 platí pro plochu oblouku.
                 p_var_mat = get_surcharge_db("Prodloužení modulu za metr", is_rock)
                 price_per_m2_material = p_var_mat['fix'] if p_var_mat['fix'] > 0 else 2000
                 
                 avg_arc_len_m = (total_arc_len_mm / moduly) / 1000.0
                 
-                # KOREKCE GEOMETRIE PRO VYSOKÉ/HRANATÉ MODELY (0.8)
-                # Abychom se vyhnuli "bublině" a velké ploše, která neodpovídá realitě
-                geo_correction = 0.80 if model.upper() in ANGULAR_MODELS or is_rock else 1.0
-                
-                extension_area = avg_arc_len_m * (diff_len / 1000.0) * geo_correction
+                # Odstraněna geo_correction, aby cena seděla na Excel (který počítá plnou plochu)
+                extension_area = avg_arc_len_m * (diff_len / 1000.0) 
                 material_cost = extension_area * price_per_m2_material
                 debug_ext_mat = material_cost
                 
@@ -621,6 +619,9 @@ if app_mode == "Kalkulátor":
                 debug_ext_total = total_ext_cost
                 
                 det_txt = f"+{diff_len} mm"
+                if poly_strecha:
+                    det_txt += " (Poly v hl. pol.)"
+                
                 items.append({"pol": f"Prodloužení {pocet_prod_modulu} mod. (ATYP)", "det": det_txt, "cen": total_ext_cost})
 
             elif diff_len < -10:
