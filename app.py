@@ -14,20 +14,26 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy import func
 
 # --- VERZE APLIKACE ---
-APP_VERSION = "74.0 (Final Poly & Extension Logic)"
+APP_VERSION = "76.0 (Three Geometry Groups)"
 
 # --- HESLO ADMINA ---
 ADMIN_PASSWORD = "admin123"
 
 # --- KONFIGURACE VÝROBY ---
 ROOF_OVERLAP_MM = 100 
-FACE_WASTE_COEF = 0.85 
+FACE_WASTE_COEF = 0.82 
 MIN_MODULE_LEN_MM = 1800 
 STANDARD_MODULE_LEN_MM = 2190
 
-# --- KATEGORIE MODELŮ (GEOMETRIE) ---
-# Modely, které mají hranatý tvar (korekce plochy)
-ANGULAR_MODELS = ["FLASH", "WING", "DREAM", "TERRACE", "ROCK", "HARMONY"]
+# --- KATEGORIE MODELŮ (DEFINICE DLE UŽIVATELE) ---
+# 1. BOX: Nízké, hranaté (Flash, Wing, Dream) -> Málo poly, Hodně profilu (Rám)
+BOX_MODELS = ["FLASH", "WING", "DREAM"]
+
+# 2. HIGH: Vysoké, svislé stěny (Rock, Terrace, Harmony, Sunset, Wave) -> Korekce oproti bublině
+HIGH_MODELS = ["TERRACE", "ROCK", "HARMONY", "SUNSET", "WAVE"]
+
+# 3. ARCH: Střední, obloukové (Practic, Horizont, Star) -> Čistá geometrie
+ARCH_MODELS = ["PRACTIC", "HORIZONT", "STAR", "DEFAULT"]
 
 # --- DEFINICE MODELŮ ---
 MODEL_PARAMS = {
@@ -143,36 +149,62 @@ def geometry_segment_values(width_mm, height_mm):
     production_area = raw_rect_area * FACE_WASTE_COEF # Pouze pro čela
     return production_area, arc_len, raw_rect_area
 
-def calculate_average_geometry(model_name, width_input_mm, height_input_mm, modules, total_length_mm):
+def calculate_smart_geometry(model_name, width_input_mm, height_input_mm, modules, total_length_mm):
     """
-    Vypočítá geometrii na základě průměrného (středního) segmentu.
-    Toto odpovídá logice Excelu: (Malý + Velký) / 2 * Počet.
+    Chytrý výpočet geometrie pro 3 skupiny modelů: BOX, HIGH, ARCH.
+    Vrací: (Plocha Poly pro cenu, Plocha čel, Délka konstrukce pro prodloužení)
     """
     params = MODEL_PARAMS.get(model_name.upper(), MODEL_PARAMS["DEFAULT"])
     step_w = params["step_w"]
     step_h = params["step_h"]
 
-    # 1. Nejmenší segment
+    # 1. Základní geometrie segmentů (Malý a Velký)
     w_small = width_input_mm
     h_small = height_input_mm
-    area_face_small, arc_len_small_mm, _ = geometry_segment_values(w_small, h_small)
+    area_face_small, arc_small, _ = geometry_segment_values(w_small, h_small)
     
-    # 2. Největší segment
     w_large = width_input_mm + ((modules - 1) * step_w)
     h_large = height_input_mm + ((modules - 1) * step_h)
-    area_face_large, arc_len_large_mm, _ = geometry_segment_values(w_large, h_large)
+    area_face_large, arc_large, _ = geometry_segment_values(w_large, h_large)
     
-    # 3. Průměrná délka oblouku (Střední segment)
-    avg_arc_len_mm = (arc_len_small_mm + arc_len_large_mm) / 2.0
+    avg_arc_len_mm = (arc_small + arc_large) / 2.0
+    avg_width = (w_small + w_large) / 2.0
+    avg_height = (h_small + h_large) / 2.0
+
+    # 2. LOGIKA DLE SKUPIN (The Three Sisters Logic)
     
-    # 4. Celková plocha střechy (BEZ PŘEKRYVŮ - ty řeší koeficient 1.1 v ceně)
-    # Plocha = Průměrný oblouk * Celková délka zastřešení
-    total_roof_area_geometric = (avg_arc_len_mm / 1000.0) * (total_length_mm / 1000.0)
+    model_cat = "ARCH"
+    if model_name.upper() in BOX_MODELS: model_cat = "BOX"
+    elif model_name.upper() in HIGH_MODELS: model_cat = "HIGH"
     
-    # 5. Celková délka všech oblouků (pro výpočet materiálu prodloužení)
-    total_arc_len_mm_sum = avg_arc_len_mm * modules
+    poly_correction = 1.0
+    struct_len_mm = avg_arc_len_mm # Default
+
+    if model_cat == "BOX":
+        # FLASH, WING, DREAM
+        # Poly: Placka (korekce 0.8)
+        poly_correction = 0.80 
+        # Konstrukce: Rám (Šířka + 2*Výška) - mnohem víc materiálu než oblouk
+        struct_len_mm = avg_width + (1.8 * avg_height)
+        
+    elif model_cat == "HIGH":
+        # ROCK, TERRACE, HARMONY
+        # Poly: Svislé stěny (korekce 0.85, aby nebyla bublina)
+        poly_correction = 0.85
+        # Konstrukce: Oblouk s korekcí (nebo čistý oblouk, dle Rock testu)
+        struct_len_mm = avg_arc_len_mm * 0.9 # Lehká korekce, Rock má méně "masa" než plná bublina
+        
+    else: # ARCH (PRACTIC, HORIZONT)
+        # Poly: Čistý oblouk
+        poly_correction = 1.0
+        # Konstrukce: Čistý oblouk
+        struct_len_mm = avg_arc_len_mm
+
+    # 3. Finální hodnoty
+    total_roof_area_poly = (avg_arc_len_mm / 1000.0) * (total_length_mm / 1000.0) * poly_correction
+    total_struct_len_m_sum = (struct_len_mm * modules) / 1000.0
     
-    return total_roof_area_geometric, area_face_large, area_face_small, total_arc_len_mm_sum
+    return total_roof_area_poly, area_face_large, area_face_small, total_struct_len_m_sum, model_cat
 
 def get_surcharge_db(search_term, is_rock=False):
     if not SessionLocal: return {"fix": 0, "pct": 0}
@@ -567,8 +599,8 @@ if app_mode == "Kalkulátor":
                 steps = zvyseni_cm / 10
                 items.append({"pol": f"Zvýšení o {zvyseni_cm} cm", "det": f"+{pct_per_10cm * steps * 100:.0f}%", "cen": base_price * pct_per_10cm * steps})
 
-            # Použití NOVÉ funkce pro geometrii (průměrný segment)
-            roof_a_geo, face_a_large, face_a_small, total_arc_len_mm_sum = calculate_average_geometry(model, sirka, height, moduly, celkova_delka)
+            # VOLÁNÍ CHYTRÉ GEOMETRIE
+            roof_a_poly, face_a_large, face_a_small, total_struct_len_m_sum, model_cat = calculate_smart_geometry(model, sirka, height, moduly, celkova_delka)
             
             # --- DEBUG VARIABLES ---
             debug_ext_fix = 0
@@ -585,14 +617,10 @@ if app_mode == "Kalkulátor":
                 p_var_mat = get_surcharge_db("Prodloužení modulu za metr", is_rock)
                 price_per_m2_material = p_var_mat['fix'] if p_var_mat['fix'] > 0 else 2000
                 
-                # Výpočet materiálu prodloužení: Průměrný oblouk * Délka prodloužení (v metrech)
-                # Používáme sumu délek všech oblouků / počet modulů = průměrný oblouk
-                avg_arc_len_m = (total_arc_len_mm_sum / moduly) / 1000.0
+                # Výpočet materiálu prodloužení podle skupiny modelů
+                avg_struct_len_m = total_struct_len_m_sum / moduly
+                extension_area = avg_struct_len_m * (diff_len / 1000.0) 
                 
-                # Pokud je model hranatý, stále držíme korekci 0.8 (protože v ceníku jsou tyto profily levnější/lehčí)
-                geo_correction = 0.80 if model.upper() in ANGULAR_MODELS else 1.0
-                
-                extension_area = avg_arc_len_m * (diff_len / 1000.0) * geo_correction
                 material_cost = extension_area * price_per_m2_material
                 debug_ext_mat = material_cost
                 
@@ -635,10 +663,10 @@ if app_mode == "Kalkulátor":
             p_poly_price = get_surcharge_db("Plný polykarbonát", is_rock)
             poly_base_price = p_poly_price['fix'] if p_poly_price['fix'] > 10 else 1000
             
-            # NOVÝ VÝPOČET POLY: Čistá geometrie * 1.1
             if poly_strecha: 
-                cost_poly_roof = roof_a_geo * poly_base_price * 1.1
-                items.append({"pol": "Plný poly (Střecha)", "det": f"{roof_a_geo:.1f} m² (Geo)", "cen": cost_poly_roof})
+                # Cena se nyní počítá z CHYTRÉ plochy (různá pro BOX/HIGH/ARCH)
+                cost_poly_roof = roof_a_poly * poly_base_price * 1.1
+                items.append({"pol": "Plný poly (Střecha)", "det": f"{roof_a_poly:.1f} m² (Geo: {model_cat})", "cen": cost_poly_roof})
             
             if poly_celo_male and not bez_maleho_cela: items.append({"pol": "Plný poly (M. čelo)", "det": f"{face_a_small:.1f} m²", "cen": face_a_small * poly_base_price})
             if poly_celo_velke and not bez_velkeho_cela: items.append({"pol": "Plný poly (V. čelo)", "det": f"{face_a_large:.1f} m²", "cen": face_a_large * poly_base_price})
@@ -694,16 +722,21 @@ if app_mode == "Kalkulátor":
             df_res = pd.DataFrame(items)
             if not df_res.empty: st.dataframe(df_res[['pol', 'det', 'cen']].style.format({"cen": "{:,.0f}"}), hide_index=True, use_container_width=True)
             
+            # --- DEBUG SECTION ---
             with st.expander("🔍 Detailní rozpad ceny (Debug Mode)", expanded=True):
                 st.markdown(f"""
                 <div class='debug-box'>
                 <strong>Prodloužení ({diff_len:.0f} mm):</strong><br>
-                1. Fixní poplatek: {pocet_prod_modulu} x 3000 = <b>{debug_ext_fix:,.0f} Kč</b><br>
-                2. Materiál (Plocha): {debug_ext_mat:,.0f} Kč<br>
+                1. Fixní poplatek: {pocet_prod_modulu} x {atyp_fee} = <b>{debug_ext_fix:,.0f} Kč</b><br>
+                2. Materiál (Plocha: {extension_area:.2f} m²): {debug_ext_mat:,.0f} Kč<br>
                 3. Koleje: {debug_ext_rail:,.0f} Kč<br>
-                <strong>CELKEM PRODLOUŽENÍ: {debug_ext_total:,.0f} Kč</strong>
+                <strong>CELKEM PRODLOUŽENÍ: {debug_ext_total:,.0f} Kč</strong><br><br>
+                <strong>Polykarbonát:</strong><br>
+                Kategorie: {model_cat}<br>
+                Plocha střechy: {roof_a_poly:.2f} m² (vč. korekce)
                 </div>
                 """, unsafe_allow_html=True)
+            # ---------------------
 
             st.divider()
             st.metric("Cena CELKEM", f"{total_vat:,.0f} Kč", delta=f"Bez DPH: {total_no_vat:,.0f}")
